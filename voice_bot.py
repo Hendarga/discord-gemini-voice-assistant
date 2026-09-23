@@ -30,12 +30,16 @@ def _apply_voice_recv_patch():
         def _safe_decode(self, packet):
             try:
                 return _orig_decode(self, packet)
-            except (_dopus.OpusError, Exception):
-                return packet, bytes(7680)
+            except _dopus.OpusError as e:
+                print(f"[VOICE] Пропущен повреждённый Opus-пакет: {e}", flush=True)
+                return packet, b""
 
         vr_opus.PacketDecoder._decode_packet = _safe_decode
     except Exception:
         pass
+
+
+_apply_voice_recv_patch()
 
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
