@@ -1,8 +1,9 @@
-discord.py-self==2.1.0
+discord.py-self @ https://github.com/dolfies/discord.py-self/archive/refs/heads/master.zip
 aiohttp>=3.9
 python-dotenv>=1.0
 SpeechRecognition>=3.10.0
 edge-tts>=6.1.0
-discord-ext-voice_recv==0.5.2a179
+discord-ext-voice_recv @ https://github.com/imayhaveborkedit/discord-ext-voice-recv/archive/refs/heads/main.zip
 PyNaCl>=1.5.0
+davey>=0.1.0
 gTTS>=2.3.0

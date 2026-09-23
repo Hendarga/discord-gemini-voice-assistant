@@ -9,11 +9,10 @@ WORKDIR /app
 # Копируем зависимости и устанавливаем их
 COPY requirements.txt .
 
-# voice_recv сначала устанавливает базовый discord.py, затем self-версия
-# заменяет его файлы в namespace discord.
-RUN pip install --no-cache-dir discord-ext-voice_recv==0.5.2a179 && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir --force-reinstall --no-deps "discord.py-self==2.1.0"
+# voice_recv сначала устанавливает базовый discord.py, затем актуальный
+# self-клиент заменяет его файлы в namespace discord и получает DAVE через davey.
+RUN pip install --no-cache-dir "discord-ext-voice_recv @ https://github.com/imayhaveborkedit/discord-ext-voice-recv/archive/refs/heads/main.zip" && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Копируем исходный код
 COPY . .
