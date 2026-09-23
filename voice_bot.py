@@ -117,6 +117,7 @@ _apply_voice_recv_patch()
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY",    "").strip()
 GEMINI_MODEL      = os.getenv("GEMINI_MODEL",      "gemini-2.0-flash-lite").strip()
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.0-flash-lite").strip()
 
 # --- ИДЕНТИФИКАТОРЫ ---
 OWNER_ID        = int(os.getenv("OWNER_ID", "1121431968022798347"))
@@ -267,8 +268,8 @@ SAFETY_SETTINGS = [
 ]
 
 
-async def gemini_raw_call(payload: dict) -> dict:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+async def gemini_raw_call(payload: dict, model_name: str = GEMINI_MODEL) -> dict:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
     async with request_semaphore:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as s:
@@ -277,12 +278,35 @@ async def gemini_raw_call(payload: dict) -> dict:
                 if resp.status != 200:
                     error = data.get("error", {}) if isinstance(data, dict) else data
                     print(
-                        f"[GEMINI ERROR] status={resp.status} model={GEMINI_MODEL} "
+                        f"[GEMINI ERROR] status={resp.status} model={model_name} "
                         f"details={error}",
                         flush=True,
                     )
                     return {"error": error, "http_status": resp.status}
                 return data
+
+
+async def gemini_discover_models() -> list[str]:
+    url = "https://generativelanguage.googleapis.com/v1beta/models"
+    headers = {"x-goog-api-key": GEMINI_API_KEY}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as s:
+            async with s.get(url, headers=headers, params={"pageSize": 100}) as resp:
+                data = await resp.json(content_type=None)
+        if resp.status != 200:
+            print(f"[GEMINI ERROR] list models status={resp.status} details={data}", flush=True)
+            return []
+        models = []
+        for item in data.get("models", []):
+            methods = item.get("supportedGenerationMethods", [])
+            name = str(item.get("name", "")).removeprefix("models/")
+            if name and "generateContent" in methods:
+                models.append(name)
+        print(f"[GEMINI DEBUG] Доступные generateContent модели: {models}", flush=True)
+        return models
+    except Exception as e:
+        print(f"[GEMINI ERROR] Не удалось получить список моделей: {type(e).__name__}: {e}", flush=True)
+        return []
 
 
 def is_response_censored(data: dict) -> bool:
@@ -342,23 +366,43 @@ async def gemini_voice(channel_id: int, user_text: str, user_name: str = "Соб
         },
     }
 
-    for attempt in range(2):
-        data = await gemini_raw_call(payload)
-        if not is_response_censored(data):
-            text = extract_candidate_text(data)
-            if text:
-                text = re.sub(r"[*_~`#\[\]()]", "", text).strip()
-                history.append({"role": "model", "parts": [{"text": text}]})
-                return text or "..."
-        elif VOICE_DEBUG:
-            print(
-                f"[GEMINI DEBUG] Нет usable-ответа attempt={attempt + 1} "
-                f"model={GEMINI_MODEL} data_keys={list(data) if isinstance(data, dict) else type(data).__name__}",
-                flush=True,
-            )
-        await asyncio.sleep(1.0)
+    models = [GEMINI_MODEL]
+    if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL not in models:
+        models.append(GEMINI_FALLBACK_MODEL)
 
-    print(f"[GEMINI ERROR] Использую fallback-ответ после 2 попыток; model={GEMINI_MODEL}", flush=True)
+    discovered = False
+    model_index = 0
+    while model_index < len(models):
+        model_name = models[model_index]
+        model_index += 1
+        for attempt in range(2):
+            data = await gemini_raw_call(payload, model_name)
+            if data.get("http_status") == 404 and not discovered:
+                discovered = True
+                for discovered_model in await gemini_discover_models():
+                    if discovered_model not in models:
+                        models.append(discovered_model)
+            if not is_response_censored(data):
+                text = extract_candidate_text(data)
+                if text:
+                    text = re.sub(r"[*_~#\[\]\(\)]", "", text).strip()
+                    history.append({"role": "model", "parts": [{"text": text}]})
+                    return text or "..."
+            elif VOICE_DEBUG:
+                print(
+                    f"[GEMINI DEBUG] Нет usable-ответа attempt={attempt + 1} "
+                    f"model={model_name} data_keys={list(data) if isinstance(data, dict) else type(data).__name__}",
+                    flush=True,
+                )
+                if isinstance(data, dict) and data.get("promptFeedback", {}).get("blockReason"):
+                    print(
+                        f"[GEMINI DEBUG] Prompt заблокирован: "
+                        f"{data['promptFeedback']['blockReason']}",
+                        flush=True,
+                    )
+            await asyncio.sleep(1.0)
+
+    print(f"[GEMINI ERROR] Fallback после моделей: {models}", flush=True)
     return "Что-то со связью на дне океана!"
 
 
