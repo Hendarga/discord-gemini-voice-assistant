@@ -28,7 +28,6 @@ from discord.ext.voice_recv.extras import speechrecognition as sr_ext
 from aiohttp import web
 from dotenv import load_dotenv
 import edge_tts
-from gtts import gTTS
 
 load_dotenv()
 
@@ -144,7 +143,6 @@ TTS_VOICE    = os.getenv("TTS_VOICE",    "ru-RU-DariyaNeural")
 TTS_RATE     = os.getenv("TTS_RATE",     "+8%")
 TTS_PITCH    = os.getenv("TTS_PITCH",    "+120Hz")
 TTS_ENABLED  = os.getenv("TTS_ENABLED",  "true").lower() == "true"
-TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "ru")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
 ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2").strip()
@@ -456,29 +454,9 @@ async def synthesize_elevenlabs(text: str) -> bytes | None:
                 if resp.status == 200 and audio:
                     print("[TTS] Использован ElevenLabs", flush=True)
                     return audio
-                print(
-                    f"[TTS] ElevenLabs недоступен: status={resp.status} "
-                    f"details={audio[:300].decode('utf-8', errors='replace')}",
-                    flush=True,
-                )
+                print(f"[TTS] ElevenLabs status={resp.status}; переход на Edge TTS", flush=True)
     except Exception as e:
-        print(f"[TTS] ElevenLabs error: {type(e).__name__}: {e}", flush=True)
-    return None
-
-
-async def synthesize_google(text: str) -> bytes | None:
-    def create_audio():
-        buf = io.BytesIO()
-        gTTS(text=text, lang=TTS_LANGUAGE, slow=False).write_to_fp(buf)
-        return buf.getvalue()
-
-    try:
-        audio = await asyncio.to_thread(create_audio)
-        if audio:
-            print("[TTS] ElevenLabs недоступен, использован Google gTTS", flush=True)
-            return audio
-    except Exception as e:
-        print(f"[TTS] Google gTTS error: {type(e).__name__}: {e}", flush=True)
+        print(f"[TTS] ElevenLabs error: {type(e).__name__}: {e}; переход на Edge TTS", flush=True)
     return None
 
 
@@ -516,10 +494,6 @@ async def synthesize(text: str) -> bytes | None:
         return None
 
     audio = await synthesize_elevenlabs(clean_text)
-    if audio:
-        return audio
-
-    audio = await synthesize_google(clean_text)
     if audio:
         return audio
 
