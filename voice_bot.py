@@ -6,6 +6,7 @@ import re
 import time
 import tempfile
 import io
+from importlib import metadata
 from collections import defaultdict
 
 import aiohttp
@@ -35,14 +36,74 @@ def _apply_voice_recv_patch():
     try:
         from discord.ext.voice_recv import opus as vr_opus
         import discord.opus as _dopus
+        import davey
 
         _orig_decode = vr_opus.PacketDecoder._decode_packet
+        decode_stats = defaultdict(int)
+
+        def _should_report(count):
+            return VOICE_DEBUG and (count <= 5 or count % 100 == 0)
 
         def _safe_decode(self, packet):
+            decode_stats["packets"] += 1
+            packet_count = decode_stats["packets"]
+            voice_client = None
+            user_id = None
+            dave_ready = False
             try:
-                return _orig_decode(self, packet)
+                voice_client = self.router.sink.voice_client
+                connection = voice_client._connection
+                dave_session = getattr(connection, "dave_session", None)
+                user_id = voice_client._get_id_from_ssrc(self.ssrc)
+                dave_ready = bool(dave_session and dave_session.ready)
+                if dave_session and dave_session.ready and user_id:
+                    before_size = len(packet.decrypted_data or b"")
+                    packet.decrypted_data = dave_session.decrypt(
+                        user_id,
+                        davey.MediaType.audio,
+                        packet.decrypted_data,
+                    )
+                    decode_stats["dave_decrypted"] += 1
+                    if _should_report(decode_stats["dave_decrypted"]):
+                        print(
+                            f"[VOICE DEBUG] DAVE decrypt ok packet={packet_count} "
+                            f"ssrc={self.ssrc} user_id={user_id} "
+                            f"bytes={before_size}->{len(packet.decrypted_data)} "
+                            f"protocol={getattr(connection, 'dave_protocol_version', 0)}",
+                            flush=True,
+                        )
+                else:
+                    decode_stats["dave_not_applied"] += 1
+                    if _should_report(decode_stats["dave_not_applied"]):
+                        print(
+                            f"[VOICE DEBUG] DAVE decrypt skipped packet={packet_count} "
+                            f"ssrc={self.ssrc} user_id={user_id} ready={dave_ready} "
+                            f"protocol={getattr(connection, 'dave_protocol_version', 0)} "
+                            f"mode={getattr(voice_client, 'mode', None)}",
+                            flush=True,
+                        )
+
+                decoded = _orig_decode(self, packet)
+                decode_stats["opus_decoded"] += 1
+                return decoded
             except _dopus.OpusError as e:
-                print(f"[VOICE] Пропущен повреждённый Opus-пакет: {e}", flush=True)
+                decode_stats["opus_errors"] += 1
+                if _should_report(decode_stats["opus_errors"]):
+                    print(
+                        f"[VOICE DEBUG] Opus error #{decode_stats['opus_errors']}: {e}; "
+                        f"packet={packet_count} ssrc={self.ssrc} user_id={user_id} "
+                        f"dave_ready={dave_ready} mode={getattr(voice_client, 'mode', None)}",
+                        flush=True,
+                    )
+                return packet, b""
+            except Exception as e:
+                decode_stats["other_errors"] += 1
+                print(
+                    f"[VOICE DEBUG] Decode/DAVE error #{decode_stats['other_errors']}: "
+                    f"{type(e).__name__}: {e}; packet={packet_count} "
+                    f"ssrc={self.ssrc}",
+                    flush=True,
+                )
                 return packet, b""
 
         vr_opus.PacketDecoder._decode_packet = _safe_decode
@@ -150,6 +211,13 @@ async def send_to_owner_dm(content: str):
 
 async def handle_health(req):
     return web.Response(text="Bot is running.", status=200)
+
+
+def installed_version(package_name: str) -> str:
+    try:
+        return metadata.version(package_name)
+    except metadata.PackageNotFoundError:
+        return "not-installed"
 
 
 async def start_keepalive():
@@ -434,9 +502,11 @@ async def on_voice_state_update(
             ignore_silence_packets=True
         )
         new_vc.listen(sink)
+        dave_session = getattr(new_vc._connection, "dave_session", None)
         print(
             f"[VOICE] Receive sink запущен: listening={new_vc.is_listening()}, "
-            f"ssrc_map={getattr(new_vc, 'ssrc', {})}",
+            f"ssrc_map={getattr(new_vc, 'ssrc', {})}, "
+            f"dave_ready={bool(dave_session and dave_session.ready)}",
             flush=True,
         )
         await send_to_owner_dm(f"🟢 Подключился к ГС **{after.channel.name}** на сервере `{member.guild.name}`")
@@ -469,9 +539,11 @@ async def voice_join(message: discord.Message):
         ignore_silence_packets=True
     )
     new_vc.listen(sink)
+    dave_session = getattr(new_vc._connection, "dave_session", None)
     print(
         f"[VOICE] Receive sink запущен: listening={new_vc.is_listening()}, "
-        f"ssrc_map={getattr(new_vc, 'ssrc', {})}",
+        f"ssrc_map={getattr(new_vc, 'ssrc', {})}, "
+        f"dave_ready={bool(dave_session and dave_session.ready)}",
         flush=True,
     )
     await message.reply(f"✅ Зашел в **{message.author.voice.channel.name}**. Логи голосового чата будут идти в ЛС.", mention_author=False)
@@ -546,6 +618,16 @@ async def on_message(message: discord.Message):
 @bot.event
 async def on_ready():
     print(f"[BOT] Запущен как {bot.user} (ID: {bot.user.id})", flush=True)
+    print(
+        "[DIAGNOSTICS] "
+        f"discord={getattr(discord, '__version__', 'unknown')} "
+        f"discord.py-self={installed_version('discord.py-self')} "
+        f"voice_recv={installed_version('discord-ext-voice-recv')} "
+        f"davey={installed_version('davey')} "
+        f"pynacl={installed_version('PyNaCl')} "
+        f"stt_language={STT_LANGUAGE}",
+        flush=True,
+    )
     asyncio.create_task(start_keepalive())
     asyncio.create_task(self_ping_loop())
     asyncio.create_task(status_manager_loop())
