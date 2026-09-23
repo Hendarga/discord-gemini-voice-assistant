@@ -1,234 +1,494 @@
 import os
 import asyncio
+import random
+import re
+import time
+import tempfile
 import io
-import wave
-import json
-import numpy as np
+from collections import defaultdict
+
+import aiohttp
 import discord
-from discord.ext import commands
-import google.generativeai as genai
-from google.genai import types
+from discord.ext import voice_recv
+from discord.ext.voice_recv.extras import speechrecognition as sr_ext
+from aiohttp import web
+from dotenv import load_dotenv
 import edge_tts
-import whisper
 
-# --- КОНФИГУРАЦИЯ ---
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "YOUR_DISCORD_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
+load_dotenv()
 
-OWNER_ID = 1121431968022798347           # Твой ID для получения логов в ЛС
-TARGET_GUILD_ID = 1527454812260532306    # ID целевого сервера
 
-TTS_VOICE = "ru-RU-DmitryNeural"
-WHISPER_MODEL_NAME = "base"
+def _apply_voice_recv_patch():
+    try:
+        from discord.ext.voice_recv import opus as vr_opus
+        import discord.opus as _dopus
 
-SYSTEM_PROMPT = """Ты — Губка Боб Квадратные Штаны.
-Ты находишься в голосовом канале Discord. Отвечай коротко, задорно, используй фирменный юмор и эмоции.
-Не пиши длинные тексты — твой ответ сразу озвучивается в голосовой канал."""
+        _orig_decode = vr_opus.PacketDecoder._decode_packet
 
-# Инициализация Gemini
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel(
-    model_name="gemini-2.5-flash",
-    system_instruction=SYSTEM_PROMPT
+        def _safe_decode(self, packet):
+            try:
+                return _orig_decode(self, packet)
+            except (_dopus.OpusError, Exception):
+                return packet, bytes(7680)
+
+        vr_opus.PacketDecoder._decode_packet = _safe_decode
+    except Exception:
+        pass
+
+
+_apply_voice_recv_patch()
+
+
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY",    "").strip()
+GEMINI_MODEL      = os.getenv("GEMINI_MODEL",      "gemini-2.0-flash-lite").strip()
+
+# --- ИДЕНТИФИКАТОРЫ ---
+OWNER_ID        = int(os.getenv("OWNER_ID", "1121431968022798347"))
+TARGET_GUILD_ID = int(os.getenv("TARGET_GUILD_ID", "1527454812260532306"))
+
+ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
+
+SYSTEM_PROMPT = os.getenv(
+    "SYSTEM_PROMPT",
+    (
+        "Ты — Губка Боб Квадратные Штаны из городка Бикини Боттом. "
+        "Ты неунывающий оптимист, работаешь лучшим поваром в 'Красти Краб', обожаешь жарить крабсбургеры и ловить медуз с Патриком. "
+        "Общайся жизнерадостно, живо, эмоционально, с характерным юмором Губки Боба, но без излишней клоунады, если ситуация требует серьезности. "
+        "Никогда не выходи из роли. Не читай моралей и нотаций."
+    )
 )
 
-# Загрузка Whisper
-print("[INIT] Загрузка модели Whisper...")
-whisper_model = whisper.load_model(WHISPER_MODEL_NAME)
-print("[INIT] Whisper готов к работе.")
+TRIGGER_WORDS_RAW = os.getenv("TRIGGER_WORDS", "боб,губка,spongebob,бот,bot")
+TARGET_IDS_RAW    = os.getenv("TARGET_IDS",    "")
+TARGET_COOLDOWN   = int(os.getenv("TARGET_COOLDOWN", "180"))
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.voice_states = True
-intents.guilds = True
+TTS_VOICE    = os.getenv("TTS_VOICE",    "ru-RU-DariyaNeural")
+TTS_RATE     = os.getenv("TTS_RATE",     "+10%")
+TTS_PITCH    = os.getenv("TTS_PITCH",    "+0Hz")
+TTS_ENABLED  = os.getenv("TTS_ENABLED",  "true").lower() == "true"
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+WEB_PORT = int(os.getenv("PORT", "10000"))
+COALESCE_DELAY = 6.0
 
-chat_histories = {}
-voice_lock = asyncio.Lock()
+bot               = discord.Client()
+request_semaphore = asyncio.Semaphore(3)
+voice_lock        = asyncio.Lock()
+
+voice_history = defaultdict(list)
+user_cooldowns:   dict[int, float] = {}
+is_bot_active     = True
+last_active_time  = 0.0
+current_status    = discord.Status.invisible
+tts_voice_current = TTS_VOICE
+
+message_buffers = {}
+message_tasks   = {}
 
 
-async def get_owner_dm():
-    """Получает объект пользователя для отправки сообщений в ЛС."""
-    owner = bot.get_user(OWNER_ID)
-    if not owner:
-        try:
-            owner = await bot.fetch_user(OWNER_ID)
-        except Exception as e:
-            print(f"[ERROR] Не удалось найти владельца {OWNER_ID}: {e}", flush=True)
-            return None
-    return owner
+def get_trigger_words() -> list[str]:
+    return [x.strip().lower() for x in TRIGGER_WORDS_RAW.split(",") if x.strip()]
 
 
-async def gemini_voice(user_id: int, text: str, user_name: str) -> str:
-    if user_id not in chat_histories:
-        chat_histories[user_id] = gemini_model.start_chat(history=[])
-    chat = chat_histories[user_id]
-    
-    prompt = f"Пользователь {user_name} сказал в ГС: {text}"
+def get_target_ids() -> set[int]:
+    return {int(x) for x in TARGET_IDS_RAW.split(",") if x.strip().isdigit()}
+
+
+def estimate_tokens(text: str) -> int:
+    return max(1, len(text) // 3)
+
+
+def split_for_discord(text: str, limit: int = 2000) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+    chunks, i = [], 0
+    while i < len(text):
+        cut = text.rfind("\n", i, i + limit)
+        if cut <= i:
+            cut = text.rfind(" ", i, i + limit)
+        if cut <= i:
+            cut = i + limit
+        chunks.append(text[i:cut].strip())
+        i = cut
+    return [c for c in chunks if c]
+
+
+def clean_reply(text: str) -> str:
+    text = text.strip()
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1].strip()
+    return re.sub(r"\n{3,}", "\n\n", text)
+
+
+async def send_to_owner_dm(content: str):
+    """Отправляет текстовое сообщение напрямую тебе в ЛС."""
+    if not OWNER_ID:
+        return
     try:
-        response = await asyncio.to_thread(chat.send_message, prompt)
-        return response.text.strip()
+        owner = bot.get_user(OWNER_ID) or await bot.fetch_user(OWNER_ID)
+        if owner:
+            await owner.send(content)
     except Exception as e:
-        print(f"[GEMINI ERROR] {e}", flush=True)
-        return f"[ОШИБКА ИИ]: {e}"
+        print(f"[DM ERROR] Не удалось отправить в ЛС: {e}", flush=True)
 
 
-async def synthesize(text: str) -> bytes:
+async def handle_health(req):
+    return web.Response(text="Bot is running.", status=200)
+
+
+async def start_keepalive():
+    app = web.Application()
+    app.router.add_get("/", handle_health)
+    app.router.add_get("/health", handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", WEB_PORT).start()
+
+
+async def self_ping_loop():
+    url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+    if not url:
+        return
+    await asyncio.sleep(30)
+    while True:
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.get(f"{url}/health", timeout=aiohttp.ClientTimeout(total=10))
+        except Exception:
+            pass
+        await asyncio.sleep(300)
+
+
+async def status_manager_loop():
+    global current_status
+    await bot.wait_until_ready()
+    await bot.change_presence(status=discord.Status.invisible)
+    while True:
+        now = time.time()
+        target = discord.Status.online if (now - last_active_time) < 300 else discord.Status.invisible
+        if target != current_status:
+            try:
+                await bot.change_presence(status=target)
+                current_status = target
+            except Exception:
+                pass
+        await asyncio.sleep(10)
+
+
+SAFETY_SETTINGS = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+]
+
+
+async def gemini_raw_call(payload: dict) -> dict:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
+    async with request_semaphore:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as s:
+            async with s.post(url, json=payload, headers=headers) as resp:
+                data = await resp.json(content_type=None)
+                return data if resp.status == 200 else {"error": data.get("error", {})}
+
+
+def is_response_censored(data: dict) -> bool:
+    if not isinstance(data, dict):
+        return True
+    prompt_feedback = data.get("promptFeedback", {})
+    if prompt_feedback.get("blockReason"):
+        return True
+    candidates = data.get("candidates", [])
+    if not candidates:
+        return True
+    for c in candidates:
+        reason = str(c.get("finishReason", "")).upper()
+        if any(kw in reason for kw in ("SAFETY", "BLOCKED", "PROHIBITED")):
+            return True
+        parts = c.get("content", {}).get("parts", [])
+        text = "".join(p.get("text", "") for p in parts if "text" in p).strip()
+        if not text:
+            return True
+    return False
+
+
+def extract_candidate_text(data: dict) -> str:
     try:
-        communicate = edge_tts.Communicate(text, TTS_VOICE)
-        audio_data = bytearray()
+        parts = data["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts if "text" in p).strip()
+    except Exception:
+        return ""
+
+
+async def gemini_voice(channel_id: int, user_text: str, user_name: str = "Собеседник") -> str:
+    history = voice_history[channel_id]
+    formatted_input = f"[{user_name}]: {user_text}"
+
+    if history and history[-1].get("role") == "user":
+        history[-1]["parts"][0]["text"] += f"\n{formatted_input}"
+    else:
+        history.append({"role": "user", "parts": [{"text": formatted_input}]})
+
+    if len(history) > 30:
+        voice_history[channel_id] = history[-30:]
+        history = voice_history[channel_id]
+
+    voice_prompt = (
+        SYSTEM_PROMPT
+        + "\n\n[ГОЛОСОВОЙ РЕЖИМ] Отвечай кратко, максимум 2-3 предложения. "
+        "Не используй эмодзи, звездочки, скобки и спецсимволы. Отвечай прямо речью вслух."
+    )
+
+    payload = {
+        "system_instruction": {"parts": [{"text": voice_prompt}]},
+        "contents": history,
+        "safetySettings": SAFETY_SETTINGS,
+        "generationConfig": {
+            "maxOutputTokens": 300,
+            "temperature": 0.85
+        },
+    }
+
+    for attempt in range(2):
+        data = await gemini_raw_call(payload)
+        if not is_response_censored(data):
+            text = extract_candidate_text(data)
+            if text:
+                text = re.sub(r"[*_~`#\[\]()]", "", text).strip()
+                history.append({"role": "model", "parts": [{"text": text}]})
+                return text or "..."
+        await asyncio.sleep(1.0)
+
+    return "Что-то со связью на дне океана!"
+
+
+async def synthesize(text: str) -> bytes | None:
+    if not TTS_ENABLED:
+        return None
+
+    clean_text = re.sub(r"[*_~`#\[\]()]", "", text).strip()
+    if not clean_text:
+        return None
+
+    try:
+        communicate = edge_tts.Communicate(
+            clean_text,
+            tts_voice_current,
+            rate=TTS_RATE,
+            pitch=TTS_PITCH
+        )
+        buf = io.BytesIO()
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
-                audio_data.extend(chunk["data"])
-        return bytes(audio_data)
+                buf.write(chunk["data"])
+        return buf.getvalue()
     except Exception as e:
         print(f"[TTS ERROR] {e}", flush=True)
-        return b""
+        return None
 
 
 async def play_in_vc(vc: discord.VoiceClient, audio_bytes: bytes):
-    if not audio_bytes:
-        return
-    
-    input_stream = io.BytesIO(audio_bytes)
-    source = discord.FFmpegPCMAudio(input_stream, pipe=True)
-    
-    if vc.is_playing():
-        vc.stop()
-        
-    vc.play(source)
-    while vc.is_playing():
-        await asyncio.sleep(0.1)
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
+    done = asyncio.Event()
+    loop = asyncio.get_event_loop()
+    try:
+        source = discord.FFmpegPCMAudio(tmp_path)
+
+        def after(err):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+            loop.call_soon_threadsafe(done.set)
+
+        vc.play(source, after=after)
+        await asyncio.wait_for(done.wait(), timeout=120)
+    except asyncio.TimeoutError:
+        pass
+    except Exception as e:
+        print(f"[PLAY ERROR] {e}", flush=True)
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
 
-async def handle_recognized_speech(user: discord.User, text: str, vc: discord.VoiceClient):
+async def handle_recognized_speech(text_channel, user, text, vc):
+    """Принимает голос, отправляет расшифровку и ответ в ЛС владельцу, озвучивает в ГС."""
     if not text or len(text.strip()) < 2:
         return
 
     async with voice_lock:
-        owner = await get_owner_dm()
+        # 1. Отправляем распознанную речь тебе в ЛС
+        await send_to_owner_dm(f"🎤 **[ГС] {user.display_name}**: {text}")
 
-        # 1. Отправка распознанной речи в ЛС
-        if owner:
-            try:
-                await owner.send(f"🎤 **[ГС] {user.display_name}**: {text}")
-            except Exception as e:
-                print(f"[DM ERROR] Не удалось отправить в ЛС: {e}", flush=True)
+        # 2. Получаем ответ ИИ
+        reply = await gemini_voice(vc.channel.id if vc else 0, text, user.display_name)
 
-        # 2. Запрос к Gemini
-        reply = await gemini_voice(OWNER_ID, text, user.display_name)
-
-        if reply.startswith("[ОШИБКА"):
-            if owner:
-                try:
-                    await owner.send(f"⚠️ Ошибка ИИ:\n```{reply}```")
-                except Exception:
-                    pass
+        if reply.startswith("[ОШИБКА") or reply.startswith("Ошибка"):
+            await send_to_owner_dm(f"⚠️ Ошибка ИИ в ГС:\n```{reply}```")
             return
 
-        # 3. Отправка ответа бота в ЛС
-        if owner:
-            try:
-                await owner.send(f"🧽 **Губка Боб**: {reply}")
-            except Exception:
-                pass
+        # 3. Отправляем ответ бота тебе в ЛС
+        await send_to_owner_dm(f"🧽 **Губка Боб**: {reply}")
 
-        # 4. Озвучка в голосовой канал
+        # 4. Воспроизводим звук в голосовой канал
         audio_bytes = await synthesize(reply)
         if audio_bytes and vc and vc.is_connected():
             await play_in_vc(vc, audio_bytes)
 
 
-class WhisperAudioSink(discord.AudioSink):
-    """Сборщик аудиопотока из голосового канала."""
-    def __init__(self, vc: discord.VoiceClient):
-        super().__init__()
-        self.vc = vc
-        self.user_buffers = {}
-        self.loop = asyncio.get_event_loop()
+@bot.event
+async def on_voice_state_update(
+    member: discord.Member,
+    before: discord.VoiceState,
+    after:  discord.VoiceState
+):
+    if not is_bot_active or after.channel is None or member.id == bot.user.id:
+        return
 
-    def write(self, user, data):
-        if user is None:
+    # Проверка, что событие происходит на целевом сервере
+    if member.guild.id != TARGET_GUILD_ID:
+        return
+
+    target_ids = get_target_ids()
+    if target_ids and member.id not in target_ids:
+        return
+
+    vc = member.guild.voice_client
+    if vc and vc.channel == after.channel:
+        return
+
+    try:
+        if vc:
+            await vc.disconnect(force=True)
+
+        new_vc = await after.channel.connect(cls=voice_recv.VoiceRecvClient)
+
+        def on_speech(user, text):
+            if not getattr(user, 'bot', False) and user.id != bot.user.id:
+                asyncio.run_coroutine_threadsafe(
+                    handle_recognized_speech(None, user, text, new_vc),
+                    bot.loop
+                )
+
+        sink = sr_ext.SpeechRecognitionSink(
+            default_recognizer='google',
+            text_cb=on_speech,
+            phrase_time_limit=10,
+            ignore_silence_packets=True
+        )
+        new_vc.listen(sink)
+        await send_to_owner_dm(f"🟢 Подключился к ГС **{after.channel.name}** на сервере `{member.guild.name}`")
+
+    except Exception as e:
+        print(f"[VOICE TRACK ERROR] {e}", flush=True)
+
+
+async def voice_join(message: discord.Message):
+    if not message.author.voice:
+        await message.reply("❌ Зайди в голосовой канал!", mention_author=False)
+        return
+    vc = message.guild.voice_client
+    if vc:
+        await vc.disconnect(force=True)
+    new_vc = await message.author.voice.channel.connect(cls=voice_recv.VoiceRecvClient)
+
+    def on_speech(user, text):
+        if not getattr(user, 'bot', False) and user.id != bot.user.id:
+            asyncio.run_coroutine_threadsafe(
+                handle_recognized_speech(None, user, text, new_vc),
+                bot.loop
+            )
+
+    sink = sr_ext.SpeechRecognitionSink(
+        default_recognizer='google',
+        text_cb=on_speech,
+        phrase_time_limit=10,
+        ignore_silence_packets=True
+    )
+    new_vc.listen(sink)
+    await message.reply(f"✅ Зашел в **{message.author.voice.channel.name}**. Логи голосового чата будут идти в ЛС.", mention_author=False)
+
+
+async def voice_leave(message: discord.Message):
+    vc = message.guild.voice_client
+    if not vc:
+        await message.reply("❌ Я не в голосовом канале.", mention_author=False)
+        return
+    await vc.disconnect(force=True)
+    await message.reply("👋 Поплыл обратно в ананас!", mention_author=False)
+
+
+VOICE_CMDS = {
+    "!join":  (voice_join,  False),
+    "!войти": (voice_join,  False),
+    "!leave": (voice_leave, False),
+    "!выйти": (voice_leave, False),
+}
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    global is_bot_active, last_active_time
+
+    if message.author.bot or message.author == bot.user:
+        return
+
+    content = message.content.strip()
+    if not content:
+        return
+
+    parts   = content.split(maxsplit=1)
+    cmd_key = parts[0].lower()
+
+    if cmd_key in VOICE_CMDS:
+        handler, _ = VOICE_CMDS[cmd_key]
+        await handler(message)
+        return
+
+    # Управление через ЛС (команды # и %)
+    if message.guild is None and message.author.id == OWNER_ID:
+        if content.startswith("#"):
+            text_to_say = content[1:].strip()
+            vc = next((g.voice_client for g in bot.guilds if g.voice_client and g.voice_client.is_connected()), None)
+            if not vc:
+                await message.reply("❌ Бот не подключен к ГС.", mention_author=False)
+                return
+            audio = await synthesize(text_to_say)
+            if audio:
+                await play_in_vc(vc, audio)
+                await message.reply(f"🔊 Озвучено в **{vc.channel.name}**", mention_author=False)
             return
-        
-        pcm_data = data.pcm
-        if user.id not in self.user_buffers:
-            self.user_buffers[user.id] = bytearray()
-            
-        self.user_buffers[user.id].extend(pcm_data)
 
-        # Если накоплено ~3 секунды аудио (48000 Hz * 2 ch * 2 bytes * 3 sec = 576000 bytes)
-        if len(self.user_buffers[user.id]) >= 576000:
-            raw_pcm = bytes(self.user_buffers[user.id])
-            self.user_buffers[user.id].clear()
-            
-            self.loop.create_task(self._process_user_audio(user, raw_pcm))
+        elif content.startswith("%"):
+            question = content[1:].strip()
+            vc = next((g.voice_client for g in bot.guilds if g.voice_client and g.voice_client.is_connected()), None)
+            if not vc:
+                await message.reply("❌ Бот не подключен к ГС.", mention_author=False)
+                return
+            reply = await gemini_voice(vc.channel.id, question, message.author.display_name)
+            await send_to_owner_dm(f"🧽 **Губка Боб**: {reply}")
+            audio = await synthesize(reply)
+            if audio:
+                await play_in_vc(vc, audio)
+            return
 
-    async def _process_user_audio(self, user, pcm_bytes):
-        # Преобразование PCM в WAV для Whisper
-        wav_io = io.BytesIO()
-        with wave.open(wav_io, 'wb') as wf:
-            wf.setnchannels(2)
-            wf.setsampwidth(2)
-            wf.setframerate(48000)
-            wf.writeframes(pcm_bytes)
-        
-        wav_io.seek(0)
-        
-        # Запуск Whisper в отдельном потоке
-        def _transcribe():
-            audio_np = np.frombuffer(wav_io.read(), dtype=np.int16).astype(np.float32) / 32768.0
-            result = whisper_model.transcribe(audio_np, language="ru", fp16=False)
-            return result.get("text", "")
-
-        recognized_text = await asyncio.to_thread(_transcribe)
-        
-        if recognized_text.strip():
-            await handle_recognized_speech(user, recognized_text.strip(), self.vc)
+    last_active_time = time.time()
 
 
 @bot.event
 async def on_ready():
-    print(f"✅ Бот запущен как {bot.user} (ID: {bot.user.id})", flush=True)
-    guild = bot.get_guild(TARGET_GUILD_ID)
-    if guild:
-        print(f"📌 Подключено к целевому серверу: {guild.name} ({guild.id})", flush=True)
-    else:
-        print(f"⚠️ Сервер {TARGET_GUILD_ID} не найден. Проверь наличие бота на сервере.", flush=True)
-
-
-@bot.command(name="join")
-async def join_vc(ctx):
-    """Подключение к голосовому каналу команды."""
-    if not ctx.author.voice:
-        await ctx.send("Зайди в голосовой канал!")
-        return
-
-    channel = ctx.author.voice.channel
-    vc = await channel.connect(cls=discord.VoiceClient)
-    
-    # Запуск прослушивания через WhisperAudioSink
-    vc.start_recording(
-        WhisperAudioSink(vc),
-        lambda e: print(f"Recording stopped: {e}"),
-        ctx.channel
-    )
-    
-    owner = await get_owner_dm()
-    if owner:
-        await owner.send(f"🟢 Подключился к ГС **{channel.name}** на сервере `{ctx.guild.name}`. Вся переписка будет здесь.")
-
-
-@bot.command(name="leave")
-async def leave_vc(ctx):
-    """Отключение от голосового канала."""
-    if ctx.voice_client:
-        await ctx.voice_client.disconnect()
-        owner = await get_owner_dm()
-        if owner:
-            await owner.send("🔴 Отключился от голосового канала.")
+    print(f"[BOT] Запущен как {bot.user} (ID: {bot.user.id})", flush=True)
+    asyncio.create_task(start_keepalive())
+    asyncio.create_task(self_ping_loop())
+    asyncio.create_task(status_manager_loop())
 
 
 if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN)
+    if not DISCORD_BOT_TOKEN:
+        raise RuntimeError("[ОШИБКА] DISCORD_BOT_TOKEN не указан!")
+    bot.run(DISCORD_BOT_TOKEN)
