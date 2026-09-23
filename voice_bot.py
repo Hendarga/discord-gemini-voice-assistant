@@ -144,6 +144,7 @@ TTS_PITCH    = os.getenv("TTS_PITCH",    "+0Hz")
 TTS_ENABLED  = os.getenv("TTS_ENABLED",  "true").lower() == "true"
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ru-RU").strip()
 VOICE_DEBUG  = os.getenv("VOICE_DEBUG", "true").lower() == "true"
+VOICE_INTERRUPT_RMS = int(os.getenv("VOICE_INTERRUPT_RMS", "1200"))
 
 WEB_PORT = int(os.getenv("PORT", "10000"))
 COALESCE_DELAY = 6.0
@@ -274,7 +275,15 @@ async def gemini_raw_call(payload: dict) -> dict:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as s:
             async with s.post(url, json=payload, headers=headers) as resp:
                 data = await resp.json(content_type=None)
-                return data if resp.status == 200 else {"error": data.get("error", {})}
+                if resp.status != 200:
+                    error = data.get("error", {}) if isinstance(data, dict) else data
+                    print(
+                        f"[GEMINI ERROR] status={resp.status} model={GEMINI_MODEL} "
+                        f"details={error}",
+                        flush=True,
+                    )
+                    return {"error": error, "http_status": resp.status}
+                return data
 
 
 def is_response_censored(data: dict) -> bool:
@@ -342,8 +351,15 @@ async def gemini_voice(channel_id: int, user_text: str, user_name: str = "Соб
                 text = re.sub(r"[*_~`#\[\]()]", "", text).strip()
                 history.append({"role": "model", "parts": [{"text": text}]})
                 return text or "..."
+        elif VOICE_DEBUG:
+            print(
+                f"[GEMINI DEBUG] Нет usable-ответа attempt={attempt + 1} "
+                f"model={GEMINI_MODEL} data_keys={list(data) if isinstance(data, dict) else type(data).__name__}",
+                flush=True,
+            )
         await asyncio.sleep(1.0)
 
+    print(f"[GEMINI ERROR] Использую fallback-ответ после 2 попыток; model={GEMINI_MODEL}", flush=True)
     return "Что-то со связью на дне океана!"
 
 
@@ -422,6 +438,30 @@ def recognize_speech(recognizer, audio, user):
         return None
 
 
+class InterruptibleSpeechRecognitionSink(sr_ext.SpeechRecognitionSink):
+    def __init__(self, voice_client, **kwargs):
+        super().__init__(**kwargs)
+        self.voice_client = voice_client
+
+    def write(self, user, data):
+        pcm = getattr(data, "pcm", b"")
+        if user and user.id != bot.user.id and pcm:
+            signal_level = audioop.rms(pcm, 2)
+            if signal_level >= VOICE_INTERRUPT_RMS and self.voice_client.is_playing():
+                print(
+                    f"[VOICE] Перебивание: rms={signal_level}, "
+                    f"порог={VOICE_INTERRUPT_RMS}; останавливаю TTS",
+                    flush=True,
+                )
+                stop_playing = getattr(self.voice_client, "stop_playing", None)
+                if stop_playing:
+                    stop_playing()
+                else:
+                    self.voice_client.stop()
+
+        super().write(user, data)
+
+
 async def handle_recognized_speech(text_channel, user, text, vc):
     """Принимает голос, отправляет расшифровку и ответ в ЛС владельцу, озвучивает в ГС."""
     if not text or len(text.strip()) < 2:
@@ -494,7 +534,8 @@ async def on_voice_state_update(
                     bot.loop
                 )
 
-        sink = sr_ext.SpeechRecognitionSink(
+        sink = InterruptibleSpeechRecognitionSink(
+            new_vc,
             default_recognizer='google',
             process_cb=recognize_speech,
             text_cb=on_speech,
@@ -531,7 +572,8 @@ async def voice_join(message: discord.Message):
                 bot.loop
             )
 
-    sink = sr_ext.SpeechRecognitionSink(
+    sink = InterruptibleSpeechRecognitionSink(
+        new_vc,
         default_recognizer='google',
         process_cb=recognize_speech,
         text_cb=on_speech,
