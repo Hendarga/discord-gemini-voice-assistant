@@ -69,6 +69,7 @@ TTS_RATE     = os.getenv("TTS_RATE",     "+10%")
 TTS_PITCH    = os.getenv("TTS_PITCH",    "+0Hz")
 TTS_ENABLED  = os.getenv("TTS_ENABLED",  "true").lower() == "true"
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ru-RU").strip()
+VOICE_DEBUG  = os.getenv("VOICE_DEBUG", "true").lower() == "true"
 
 WEB_PORT = int(os.getenv("PORT", "10000"))
 COALESCE_DELAY = 6.0
@@ -319,9 +320,19 @@ async def play_in_vc(vc: discord.VoiceClient, audio_bytes: bytes):
 
 
 def recognize_speech(recognizer, audio, user):
+    if VOICE_DEBUG:
+        print(
+            f"[STT] Получен аудиофрагмент от {getattr(user, 'display_name', user)} "
+            f"({audio.sample_rate} Hz, {audio.sample_width} bytes)",
+            flush=True,
+        )
     try:
-        return recognizer.recognize_google(audio, language=STT_LANGUAGE)
+        text = recognizer.recognize_google(audio, language=STT_LANGUAGE)
+        print(f"[STT] Распознано: {text!r}", flush=True)
+        return text
     except sr.UnknownValueError:
+        if VOICE_DEBUG:
+            print("[STT] Речь не разобрана или слишком тихая", flush=True)
         return None
     except sr.RequestError as e:
         print(f"[STT ERROR] Google Speech Recognition: {e}", flush=True)
@@ -331,14 +342,21 @@ def recognize_speech(recognizer, audio, user):
 async def handle_recognized_speech(text_channel, user, text, vc):
     """Принимает голос, отправляет расшифровку и ответ в ЛС владельцу, озвучивает в ГС."""
     if not text or len(text.strip()) < 2:
+        if VOICE_DEBUG:
+            print("[VOICE] Получен пустой или слишком короткий текст", flush=True)
         return
 
+    print(
+        f"[VOICE] Обрабатываю фразу от {getattr(user, 'display_name', user)}: {text!r}",
+        flush=True,
+    )
     async with voice_lock:
         # 1. Отправляем распознанную речь тебе в ЛС
         await send_to_owner_dm(f"🎤 **[ГС] {user.display_name}**: {text}")
 
         # 2. Получаем ответ ИИ
         reply = await gemini_voice(vc.channel.id if vc else 0, text, user.display_name)
+        print(f"[VOICE] Ответ Gemini: {reply!r}", flush=True)
 
         if reply.startswith("[ОШИБКА") or reply.startswith("Ошибка"):
             await send_to_owner_dm(f"⚠️ Ошибка ИИ в ГС:\n```{reply}```")
@@ -349,6 +367,12 @@ async def handle_recognized_speech(text_channel, user, text, vc):
 
         # 4. Воспроизводим звук в голосовой канал
         audio_bytes = await synthesize(reply)
+        if VOICE_DEBUG:
+            print(
+                f"[TTS] Аудио {'создано' if audio_bytes else 'не создано'}; "
+                f"voice_connected={bool(vc and vc.is_connected())}",
+                flush=True,
+            )
         if audio_bytes and vc and vc.is_connected():
             await play_in_vc(vc, audio_bytes)
 
@@ -395,6 +419,11 @@ async def on_voice_state_update(
             ignore_silence_packets=True
         )
         new_vc.listen(sink)
+        print(
+            f"[VOICE] Receive sink запущен: listening={new_vc.is_listening()}, "
+            f"ssrc_map={getattr(new_vc, 'ssrc', {})}",
+            flush=True,
+        )
         await send_to_owner_dm(f"🟢 Подключился к ГС **{after.channel.name}** на сервере `{member.guild.name}`")
 
     except Exception as e:
@@ -425,6 +454,11 @@ async def voice_join(message: discord.Message):
         ignore_silence_packets=True
     )
     new_vc.listen(sink)
+    print(
+        f"[VOICE] Receive sink запущен: listening={new_vc.is_listening()}, "
+        f"ssrc_map={getattr(new_vc, 'ssrc', {})}",
+        flush=True,
+    )
     await message.reply(f"✅ Зашел в **{message.author.voice.channel.name}**. Логи голосового чата будут идти в ЛС.", mention_author=False)
 
 
