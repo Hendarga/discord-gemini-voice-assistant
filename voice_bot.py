@@ -146,6 +146,7 @@ TTS_ENABLED  = os.getenv("TTS_ENABLED",  "true").lower() == "true"
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
 ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2").strip()
+elevenlabs_disabled = False
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ru-RU").strip()
 VOICE_PHRASE_TIME_LIMIT = int(os.getenv("VOICE_PHRASE_TIME_LIMIT", "5"))
 VOICE_DEBUG  = os.getenv("VOICE_DEBUG", "true").lower() == "true"
@@ -428,7 +429,8 @@ async def gemini_voice(channel_id: int, user_text: str, user_name: str = "Соб
 
 
 async def synthesize_elevenlabs(text: str) -> bytes | None:
-    if not ELEVENLABS_API_KEY or not ELEVENLABS_VOICE_ID:
+    global elevenlabs_disabled
+    if elevenlabs_disabled or not ELEVENLABS_API_KEY or not ELEVENLABS_VOICE_ID:
         return None
 
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
@@ -454,7 +456,14 @@ async def synthesize_elevenlabs(text: str) -> bytes | None:
                 if resp.status == 200 and audio:
                     print("[TTS] Использован ElevenLabs", flush=True)
                     return audio
-                print(f"[TTS] ElevenLabs status={resp.status}; переход на Edge TTS", flush=True)
+                details = audio[:300].decode("utf-8", errors="replace")
+                if resp.status in (401, 402, 429):
+                    elevenlabs_disabled = True
+                print(
+                    f"[TTS] ElevenLabs status={resp.status}; details={details}; "
+                    "переход на Edge TTS до перезапуска",
+                    flush=True,
+                )
     except Exception as e:
         print(f"[TTS] ElevenLabs error: {type(e).__name__}: {e}; переход на Edge TTS", flush=True)
     return None
