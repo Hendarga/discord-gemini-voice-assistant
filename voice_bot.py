@@ -9,6 +9,7 @@ from collections import defaultdict
 
 import aiohttp
 import discord
+import speech_recognition as sr
 from discord.ext import voice_recv
 from discord.ext.voice_recv.extras import speechrecognition as sr_ext
 from aiohttp import web
@@ -67,6 +68,7 @@ TTS_VOICE    = os.getenv("TTS_VOICE",    "ru-RU-DariyaNeural")
 TTS_RATE     = os.getenv("TTS_RATE",     "+10%")
 TTS_PITCH    = os.getenv("TTS_PITCH",    "+0Hz")
 TTS_ENABLED  = os.getenv("TTS_ENABLED",  "true").lower() == "true"
+STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ru-RU").strip()
 
 WEB_PORT = int(os.getenv("PORT", "10000"))
 COALESCE_DELAY = 6.0
@@ -316,6 +318,16 @@ async def play_in_vc(vc: discord.VoiceClient, audio_bytes: bytes):
             pass
 
 
+def recognize_speech(recognizer, audio, user):
+    try:
+        return recognizer.recognize_google(audio, language=STT_LANGUAGE)
+    except sr.UnknownValueError:
+        return None
+    except sr.RequestError as e:
+        print(f"[STT ERROR] Google Speech Recognition: {e}", flush=True)
+        return None
+
+
 async def handle_recognized_speech(text_channel, user, text, vc):
     """Принимает голос, отправляет расшифровку и ответ в ЛС владельцу, озвучивает в ГС."""
     if not text or len(text.strip()) < 2:
@@ -377,6 +389,7 @@ async def on_voice_state_update(
 
         sink = sr_ext.SpeechRecognitionSink(
             default_recognizer='google',
+            process_cb=recognize_speech,
             text_cb=on_speech,
             phrase_time_limit=10,
             ignore_silence_packets=True
@@ -406,6 +419,7 @@ async def voice_join(message: discord.Message):
 
     sink = sr_ext.SpeechRecognitionSink(
         default_recognizer='google',
+        process_cb=recognize_speech,
         text_cb=on_speech,
         phrase_time_limit=10,
         ignore_silence_packets=True

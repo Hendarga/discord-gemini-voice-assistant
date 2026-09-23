@@ -12,7 +12,7 @@ COPY requirements.txt .
 # 1) Ставим voice_recv (он тянет обычный discord.py)
 # 2) Затем ПЕРЕЗАПИСЫВАЕМ discord.py на discord.py-self
 RUN pip install --no-cache-dir discord-ext-voice_recv==0.5.2a179 && \
-    pip install --no-cache-dir --force-reinstall discord.py-self>=2.0.0 && \
+    pip install --no-cache-dir --force-reinstall "discord.py-self>=2.0.0" && \
     pip install --no-cache-dir -r requirements.txt
 
 # Копируем исходный код
