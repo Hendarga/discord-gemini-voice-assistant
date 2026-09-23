@@ -443,34 +443,27 @@ class InterruptibleSpeechRecognitionSink(sr_ext.SpeechRecognitionSink):
         super().__init__(**kwargs)
         self.voice_client = voice_client
         self._last_signal = {}
-        self._write_count = 0
 
     def write(self, user, data):
         pcm = getattr(data, "pcm", b"")
-        self._write_count += 1
         if user and user.id != bot.user.id and pcm:
             signal_level = audioop.rms(pcm, 2)
             previous_level = self._last_signal.get(user.id, 0)
             self._last_signal[user.id] = signal_level
-            if VOICE_DEBUG and (self._write_count <= 3 or self._write_count % 250 == 0):
+            if VOICE_DEBUG and signal_level >= VOICE_INTERRUPT_RMS:
                 print(
-                    f"[VOICE DEBUG] sink_write={self._write_count} "
-                    f"user={getattr(user, 'display_name', user)} rms={signal_level} "
+                    f"[VOICE DEBUG] user={getattr(user, 'display_name', user)} "
+                    f"rms={signal_level} threshold={VOICE_INTERRUPT_RMS} "
                     f"playing={self.voice_client.is_playing()}",
                     flush=True,
                 )
-            speaking_started = previous_level < VOICE_INTERRUPT_RMS <= signal_level
-            if speaking_started and self.voice_client.is_playing():
-                print(
-                    f"[VOICE] Перебивание: rms={signal_level}, "
-                    f"порог={VOICE_INTERRUPT_RMS}; останавливаю TTS",
-                    flush=True,
-                )
-                stop_playing = getattr(self.voice_client, "stop_playing", None)
-                if stop_playing:
-                    stop_playing()
-                else:
-                    self.voice_client.stop()
+            if previous_level < VOICE_INTERRUPT_RMS <= signal_level:
+                if self.voice_client.is_playing():
+                    print(
+                        f"[VOICE] Перебивание: rms={signal_level}; останавливаю TTS",
+                        flush=True,
+                    )
+                    self.voice_client.stop_playing()
 
         super().write(user, data)
 
