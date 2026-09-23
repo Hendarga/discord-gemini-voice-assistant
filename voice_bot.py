@@ -442,12 +442,25 @@ class InterruptibleSpeechRecognitionSink(sr_ext.SpeechRecognitionSink):
     def __init__(self, voice_client, **kwargs):
         super().__init__(**kwargs)
         self.voice_client = voice_client
+        self._last_signal = {}
+        self._write_count = 0
 
     def write(self, user, data):
         pcm = getattr(data, "pcm", b"")
+        self._write_count += 1
         if user and user.id != bot.user.id and pcm:
             signal_level = audioop.rms(pcm, 2)
-            if signal_level >= VOICE_INTERRUPT_RMS and self.voice_client.is_playing():
+            previous_level = self._last_signal.get(user.id, 0)
+            self._last_signal[user.id] = signal_level
+            if VOICE_DEBUG and (self._write_count <= 3 or self._write_count % 250 == 0):
+                print(
+                    f"[VOICE DEBUG] sink_write={self._write_count} "
+                    f"user={getattr(user, 'display_name', user)} rms={signal_level} "
+                    f"playing={self.voice_client.is_playing()}",
+                    flush=True,
+                )
+            speaking_started = previous_level < VOICE_INTERRUPT_RMS <= signal_level
+            if speaking_started and self.voice_client.is_playing():
                 print(
                     f"[VOICE] Перебивание: rms={signal_level}, "
                     f"порог={VOICE_INTERRUPT_RMS}; останавливаю TTS",
