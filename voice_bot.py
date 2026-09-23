@@ -1,5 +1,6 @@
 import os
 import asyncio
+import audioop
 import random
 import re
 import time
@@ -35,9 +36,6 @@ def _apply_voice_recv_patch():
         vr_opus.PacketDecoder._decode_packet = _safe_decode
     except Exception:
         pass
-
-
-_apply_voice_recv_patch()
 
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
@@ -321,9 +319,11 @@ async def play_in_vc(vc: discord.VoiceClient, audio_bytes: bytes):
 
 def recognize_speech(recognizer, audio, user):
     if VOICE_DEBUG:
+        raw_audio = audio.get_raw_data()
+        signal_level = audioop.rms(raw_audio, audio.sample_width) if raw_audio else 0
         print(
             f"[STT] Получен аудиофрагмент от {getattr(user, 'display_name', user)} "
-            f"({audio.sample_rate} Hz, {audio.sample_width} bytes)",
+            f"({audio.sample_rate} Hz, {audio.sample_width} bytes, rms={signal_level})",
             flush=True,
         )
     try:
