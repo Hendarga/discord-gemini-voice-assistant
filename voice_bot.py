@@ -28,6 +28,7 @@ from discord.ext.voice_recv.extras import speechrecognition as sr_ext
 from aiohttp import web
 from dotenv import load_dotenv
 import edge_tts
+from gtts import gTTS
 
 load_dotenv()
 
@@ -140,10 +141,15 @@ TARGET_IDS_RAW    = os.getenv("TARGET_IDS",    "")
 TARGET_COOLDOWN   = int(os.getenv("TARGET_COOLDOWN", "180"))
 
 TTS_VOICE    = os.getenv("TTS_VOICE",    "ru-RU-DariyaNeural")
-TTS_RATE     = os.getenv("TTS_RATE",     "+10%")
-TTS_PITCH    = os.getenv("TTS_PITCH",    "+0Hz")
+TTS_RATE     = os.getenv("TTS_RATE",     "+8%")
+TTS_PITCH    = os.getenv("TTS_PITCH",    "+120Hz")
 TTS_ENABLED  = os.getenv("TTS_ENABLED",  "true").lower() == "true"
+TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "ru")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2").strip()
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ru-RU").strip()
+VOICE_PHRASE_TIME_LIMIT = int(os.getenv("VOICE_PHRASE_TIME_LIMIT", "5"))
 VOICE_DEBUG  = os.getenv("VOICE_DEBUG", "true").lower() == "true"
 
 WEB_PORT = int(os.getenv("PORT", "10000"))
@@ -272,7 +278,7 @@ async def gemini_raw_call(payload: dict, model_name: str = GEMINI_MODEL) -> dict
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
     async with request_semaphore:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as s:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25)) as s:
             async with s.post(url, json=payload, headers=headers) as resp:
                 data = await resp.json(content_type=None)
                 if resp.status != 200:
@@ -300,10 +306,20 @@ async def gemini_discover_models() -> list[str]:
         for item in data.get("models", []):
             methods = item.get("supportedGenerationMethods", [])
             name = str(item.get("name", "")).removeprefix("models/")
-            if name and "generateContent" in methods:
+            lowered_name = name.lower()
+            if (
+                name
+                and "generateContent" in methods
+                and "tts" not in lowered_name
+                and "embedding" not in lowered_name
+                and "image" not in lowered_name
+                and "pro" not in lowered_name
+                and "flash" in lowered_name
+            ):
                 models.append(name)
-        print(f"[GEMINI DEBUG] Доступные generateContent модели: {models}", flush=True)
-        return models
+        models.sort(key=lambda name: ("flash-lite" not in name.lower(), name),)
+        print(f"[GEMINI DEBUG] Доступные текстовые Flash-модели: {models[:5]}", flush=True)
+        return models[:5]
     except Exception as e:
         print(f"[GEMINI ERROR] Не удалось получить список моделей: {type(e).__name__}: {e}", flush=True)
         return []
@@ -346,8 +362,8 @@ async def gemini_voice(channel_id: int, user_text: str, user_name: str = "Соб
     else:
         history.append({"role": "user", "parts": [{"text": formatted_input}]})
 
-    if len(history) > 30:
-        voice_history[channel_id] = history[-30:]
+    if len(history) > 12:
+        voice_history[channel_id] = history[-12:]
         history = voice_history[channel_id]
 
     voice_prompt = (
@@ -361,7 +377,7 @@ async def gemini_voice(channel_id: int, user_text: str, user_name: str = "Соб
         "contents": history,
         "safetySettings": SAFETY_SETTINGS,
         "generationConfig": {
-            "maxOutputTokens": 300,
+            "maxOutputTokens": 180,
             "temperature": 0.85
         },
     }
@@ -388,6 +404,13 @@ async def gemini_voice(channel_id: int, user_text: str, user_name: str = "Соб
                     text = re.sub(r"[*_~#\[\]\(\)]", "", text).strip()
                     history.append({"role": "model", "parts": [{"text": text}]})
                     return text or "..."
+            elif isinstance(data, dict) and data.get("http_status") == 429:
+                print(
+                    f"[GEMINI ERROR] Quota exceeded for model={model_name}; "
+                    "не повторяю запрос к этой модели",
+                    flush=True,
+                )
+                break
             elif VOICE_DEBUG:
                 print(
                     f"[GEMINI DEBUG] Нет usable-ответа attempt={attempt + 1} "
@@ -406,7 +429,60 @@ async def gemini_voice(channel_id: int, user_text: str, user_name: str = "Соб
     return "Что-то со связью на дне океана!"
 
 
-async def synthesize(text: str) -> bytes | None:
+async def synthesize_elevenlabs(text: str) -> bytes | None:
+    if not ELEVENLABS_API_KEY or not ELEVENLABS_VOICE_ID:
+        return None
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg",
+    }
+    payload = {
+        "text": text,
+        "model_id": ELEVENLABS_MODEL,
+        "voice_settings": {
+            "stability": 0.38,
+            "similarity_boost": 0.8,
+            "style": 0.35,
+            "use_speaker_boost": True,
+        },
+    }
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
+            async with s.post(url, headers=headers, json=payload) as resp:
+                audio = await resp.read()
+                if resp.status == 200 and audio:
+                    print("[TTS] Использован ElevenLabs", flush=True)
+                    return audio
+                print(
+                    f"[TTS] ElevenLabs недоступен: status={resp.status} "
+                    f"details={audio[:300].decode('utf-8', errors='replace')}",
+                    flush=True,
+                )
+    except Exception as e:
+        print(f"[TTS] ElevenLabs error: {type(e).__name__}: {e}", flush=True)
+    return None
+
+
+async def synthesize_google(text: str) -> bytes | None:
+    def create_audio():
+        buf = io.BytesIO()
+        gTTS(text=text, lang=TTS_LANGUAGE, slow=False).write_to_fp(buf)
+        return buf.getvalue()
+
+    try:
+        audio = await asyncio.to_thread(create_audio)
+        if audio:
+            print("[TTS] ElevenLabs недоступен, использован Google gTTS", flush=True)
+            return audio
+    except Exception as e:
+        print(f"[TTS] Google gTTS error: {type(e).__name__}: {e}", flush=True)
+    return None
+
+
+async def synthesize_edge(text: str) -> bytes | None:
     if not TTS_ENABLED:
         return None
 
@@ -429,6 +505,25 @@ async def synthesize(text: str) -> bytes | None:
     except Exception as e:
         print(f"[TTS ERROR] {e}", flush=True)
         return None
+
+
+async def synthesize(text: str) -> bytes | None:
+    if not TTS_ENABLED:
+        return None
+
+    clean_text = text.strip()
+    if not clean_text:
+        return None
+
+    audio = await synthesize_elevenlabs(clean_text)
+    if audio:
+        return audio
+
+    audio = await synthesize_google(clean_text)
+    if audio:
+        return audio
+
+    return await synthesize_edge(clean_text)
 
 
 async def play_in_vc(vc: discord.VoiceClient, audio_bytes: bytes):
@@ -494,7 +589,7 @@ async def handle_recognized_speech(text_channel, user, text, vc):
     )
     async with voice_lock:
         # 1. Отправляем распознанную речь тебе в ЛС
-        await send_to_owner_dm(f"🎤 **[ГС] {user.display_name}**: {text}")
+        asyncio.create_task(send_to_owner_dm(f"🎤 **[ГС] {user.display_name}**: {text}"))
 
         # 2. Получаем ответ ИИ
         reply = await gemini_voice(vc.channel.id if vc else 0, text, user.display_name)
@@ -505,7 +600,7 @@ async def handle_recognized_speech(text_channel, user, text, vc):
             return
 
         # 3. Отправляем ответ бота тебе в ЛС
-        await send_to_owner_dm(f"🧽 **Губка Боб**: {reply}")
+        asyncio.create_task(send_to_owner_dm(f"🧽 **Губка Боб**: {reply}"))
 
         # 4. Воспроизводим звук в голосовой канал
         audio_bytes = await synthesize(reply)
@@ -557,7 +652,7 @@ async def on_voice_state_update(
             default_recognizer='google',
             process_cb=recognize_speech,
             text_cb=on_speech,
-            phrase_time_limit=10,
+            phrase_time_limit=VOICE_PHRASE_TIME_LIMIT,
             ignore_silence_packets=True
         )
         new_vc.listen(sink)
@@ -594,7 +689,7 @@ async def voice_join(message: discord.Message):
         default_recognizer='google',
         process_cb=recognize_speech,
         text_cb=on_speech,
-        phrase_time_limit=10,
+        phrase_time_limit=VOICE_PHRASE_TIME_LIMIT,
         ignore_silence_packets=True
     )
     new_vc.listen(sink)
