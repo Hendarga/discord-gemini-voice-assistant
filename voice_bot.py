@@ -144,7 +144,6 @@ TTS_PITCH    = os.getenv("TTS_PITCH",    "+0Hz")
 TTS_ENABLED  = os.getenv("TTS_ENABLED",  "true").lower() == "true"
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ru-RU").strip()
 VOICE_DEBUG  = os.getenv("VOICE_DEBUG", "true").lower() == "true"
-VOICE_INTERRUPT_RMS = int(os.getenv("VOICE_INTERRUPT_RMS", "1200"))
 
 WEB_PORT = int(os.getenv("PORT", "10000"))
 COALESCE_DELAY = 6.0
@@ -438,36 +437,6 @@ def recognize_speech(recognizer, audio, user):
         return None
 
 
-class InterruptibleSpeechRecognitionSink(sr_ext.SpeechRecognitionSink):
-    def __init__(self, voice_client, **kwargs):
-        super().__init__(**kwargs)
-        self.voice_client = voice_client
-        self._last_signal = {}
-
-    def write(self, user, data):
-        pcm = getattr(data, "pcm", b"")
-        if user and user.id != bot.user.id and pcm:
-            signal_level = audioop.rms(pcm, 2)
-            previous_level = self._last_signal.get(user.id, 0)
-            self._last_signal[user.id] = signal_level
-            if VOICE_DEBUG and signal_level >= VOICE_INTERRUPT_RMS:
-                print(
-                    f"[VOICE DEBUG] user={getattr(user, 'display_name', user)} "
-                    f"rms={signal_level} threshold={VOICE_INTERRUPT_RMS} "
-                    f"playing={self.voice_client.is_playing()}",
-                    flush=True,
-                )
-            if previous_level < VOICE_INTERRUPT_RMS <= signal_level:
-                if self.voice_client.is_playing():
-                    print(
-                        f"[VOICE] Перебивание: rms={signal_level}; останавливаю TTS",
-                        flush=True,
-                    )
-                    self.voice_client.stop_playing()
-
-        super().write(user, data)
-
-
 async def handle_recognized_speech(text_channel, user, text, vc):
     """Принимает голос, отправляет расшифровку и ответ в ЛС владельцу, озвучивает в ГС."""
     if not text or len(text.strip()) < 2:
@@ -540,8 +509,7 @@ async def on_voice_state_update(
                     bot.loop
                 )
 
-        sink = InterruptibleSpeechRecognitionSink(
-            new_vc,
+        sink = sr_ext.SpeechRecognitionSink(
             default_recognizer='google',
             process_cb=recognize_speech,
             text_cb=on_speech,
@@ -578,8 +546,7 @@ async def voice_join(message: discord.Message):
                 bot.loop
             )
 
-    sink = InterruptibleSpeechRecognitionSink(
-        new_vc,
+    sink = sr_ext.SpeechRecognitionSink(
         default_recognizer='google',
         process_cb=recognize_speech,
         text_cb=on_speech,
