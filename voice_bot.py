@@ -17,7 +17,6 @@ import edge_tts
 
 load_dotenv()
 
-
 def _apply_voice_recv_patch():
     try:
         from discord.ext.voice_recv import opus as vr_opus
@@ -35,9 +34,7 @@ def _apply_voice_recv_patch():
     except Exception:
         pass
 
-
 _apply_voice_recv_patch()
-
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY",    "").strip()
@@ -56,6 +53,9 @@ SYSTEM_PROMPT = os.getenv(
 
 OWNER_ID  = int(os.getenv("OWNER_ID",   "1121431968022798347"))
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
+
+# ---- ДОБАВЛЕНО: ID твоей чилки для логов ----
+CHILL_CHANNEL_ID = 1121431968022798347
 
 TRIGGER_WORDS_RAW = os.getenv("TRIGGER_WORDS", "боб,губка,spongebob,бот,bot")
 TARGET_IDS_RAW    = os.getenv("TARGET_IDS",    "")
@@ -89,14 +89,11 @@ message_tasks   = {}
 def get_trigger_words() -> list[str]:
     return [x.strip().lower() for x in TRIGGER_WORDS_RAW.split(",") if x.strip()]
 
-
 def get_target_ids() -> set[int]:
     return {int(x) for x in TARGET_IDS_RAW.split(",") if x.strip().isdigit()}
 
-
 def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 3)
-
 
 def split_for_discord(text: str, limit: int = 2000) -> list[str]:
     if len(text) <= limit:
@@ -112,17 +109,14 @@ def split_for_discord(text: str, limit: int = 2000) -> list[str]:
         i = cut
     return [c for c in chunks if c]
 
-
 def clean_reply(text: str) -> str:
     text = text.strip()
     if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
         text = text[1:-1].strip()
     return re.sub(r"\n{3,}", "\n\n", text)
 
-
 async def handle_health(req):
     return web.Response(text="Bot is running.", status=200)
-
 
 async def start_keepalive():
     app = web.Application()
@@ -131,7 +125,6 @@ async def start_keepalive():
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", WEB_PORT).start()
-
 
 async def self_ping_loop():
     url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
@@ -145,7 +138,6 @@ async def self_ping_loop():
         except Exception:
             pass
         await asyncio.sleep(300)
-
 
 async def status_manager_loop():
     global current_status
@@ -162,14 +154,12 @@ async def status_manager_loop():
                 pass
         await asyncio.sleep(10)
 
-
 SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
-
 
 async def build_text_history(channel, bot_user, token_limit: int = 35000) -> list:
     pinned_context = []
@@ -220,7 +210,6 @@ async def build_text_history(channel, bot_user, token_limit: int = 35000) -> lis
 
     return history
 
-
 def is_response_censored(data: dict) -> bool:
     if not isinstance(data, dict):
         return True
@@ -240,14 +229,12 @@ def is_response_censored(data: dict) -> bool:
             return True
     return False
 
-
 def extract_candidate_text(data: dict) -> str:
     try:
         parts = data["candidates"][0]["content"]["parts"]
         return "".join(p.get("text", "") for p in parts if "text" in p).strip()
     except Exception:
         return ""
-
 
 async def gemini_raw_call(payload: dict) -> dict:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
@@ -257,7 +244,6 @@ async def gemini_raw_call(payload: dict) -> dict:
             async with s.post(url, json=payload, headers=headers) as resp:
                 data = await resp.json(content_type=None)
                 return data if resp.status == 200 else {"error": data.get("error", {})}
-
 
 async def gemini_text(history: list, override_prompt: str = None) -> str:
     if not GEMINI_API_KEY:
@@ -351,7 +337,6 @@ async def gemini_text(history: list, override_prompt: str = None) -> str:
 
     return "*(Сцена заблокирована шлюзом API. Сформулируйте действие иначе.)*"
 
-
 async def gemini_voice(channel_id: int, user_text: str, user_name: str = "Собеседник") -> str:
     history = voice_history[channel_id]
     formatted_input = f"[{user_name}]: {user_text}"
@@ -417,7 +402,6 @@ async def gemini_voice(channel_id: int, user_text: str, user_name: str = "Соб
 
     return "Что-то со связью на дне океана!"
 
-
 async def synthesize(text: str) -> bytes | None:
     if not TTS_ENABLED:
         return None
@@ -441,7 +425,6 @@ async def synthesize(text: str) -> bytes | None:
     except Exception as e:
         print(f"[TTS ERROR] {e}", flush=True)
         return None
-
 
 async def play_in_vc(vc: discord.VoiceClient, audio_bytes: bytes):
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
@@ -470,19 +453,26 @@ async def play_in_vc(vc: discord.VoiceClient, audio_bytes: bytes):
         except Exception:
             pass
 
-
+# ---- ОБНОВЛЕННАЯ ФУНКЦИЯ ДЛЯ ВЫВОДА В ЧИЛКУ ----
 async def handle_recognized_speech(text_channel, user, text, vc):
     if not text or len(text.strip()) < 2:
         return
 
     async with voice_lock:
-        if text_channel:
-            try:
-                await text_channel.send(f"🎤 **{user.display_name}**: {text}", delete_after=90)
-            except Exception:
-                pass
+        # Пытаемся получить твой канал-чилку по ID
+        chill_channel = bot.get_channel(CHILL_CHANNEL_ID)
+        # Если чилка найдена, используем ее. Иначе fallback на канал, где была команда
+        output_channel = chill_channel if chill_channel else text_channel
 
-        reply = await gemini_voice(text_channel.id if text_channel else 0, text, user.display_name)
+        if output_channel:
+            try:
+                # Теперь сообщение не удаляется (убрано delete_after=90)
+                await output_channel.send(f"🎤 **[ГС] {user.display_name}**: {text}")
+            except Exception as e:
+                print(f"[LOG ERROR] Ошибка отправки в чилку: {e}", flush=True)
+
+        # Вызываем ИИ. Передаем ID чилки, чтобы история голоса сохранялась к ней
+        reply = await gemini_voice(output_channel.id if output_channel else 0, text, user.display_name)
 
         if reply.startswith("[ОШИБКА") or reply.startswith("Ошибка"):
             if OWNER_ID:
@@ -494,16 +484,16 @@ async def handle_recognized_speech(text_channel, user, text, vc):
                         pass
             return
 
-        if text_channel:
+        if output_channel:
             try:
-                await text_channel.send(f"🧽 **Губка Боб**: {reply}", delete_after=90)
+                # Отправляем ответ бота в ту же чилку
+                await output_channel.send(f"🧽 **Губка Боб**: {reply}")
             except Exception:
                 pass
 
         audio_bytes = await synthesize(reply)
         if audio_bytes and vc and vc.is_connected():
             await play_in_vc(vc, audio_bytes)
-
 
 @bot.event
 async def on_voice_state_update(
@@ -550,7 +540,6 @@ async def on_voice_state_update(
     except Exception as e:
         print(f"[VOICE TRACK ERROR] {e}", flush=True)
 
-
 async def voice_join(message: discord.Message):
     if not message.author.voice:
         await message.reply("❌ Зайди в голосовой канал!", mention_author=False)
@@ -573,7 +562,6 @@ async def voice_join(message: discord.Message):
     new_vc.listen(sink)
     await message.reply(f"✅ Я готов! Зашел в **{message.author.voice.channel.name}**.", mention_author=False)
 
-
 async def voice_leave(message: discord.Message):
     vc = message.guild.voice_client
     if not vc:
@@ -581,7 +569,6 @@ async def voice_leave(message: discord.Message):
         return
     await vc.disconnect(force=True)
     await message.reply("👋 Поплыл обратно в ананас!", mention_author=False)
-
 
 async def voice_say(message: discord.Message, text: str):
     vc = message.guild.voice_client
@@ -598,12 +585,10 @@ async def voice_say(message: discord.Message, text: str):
         return
     await play_in_vc(vc, audio)
 
-
 async def voice_set_voice(message: discord.Message, name: str):
     global tts_voice_current
     tts_voice_current = name.strip()
     await message.reply(f"✅ Голос изменен на: `{tts_voice_current}`", mention_author=False)
-
 
 async def voice_voices(message: discord.Message):
     await message.reply(
@@ -622,11 +607,9 @@ async def voice_voices(message: discord.Message):
         mention_author=False
     )
 
-
 async def voice_clear_history(message: discord.Message):
     voice_history.pop(message.channel.id, None)
     await message.reply("🗑️ История голоса очищена.", mention_author=False)
-
 
 async def voice_help(message: discord.Message):
     await message.reply(
@@ -641,7 +624,6 @@ async def voice_help(message: discord.Message):
         mention_author=False
     )
 
-
 VOICE_CMDS = {
     "!join":    (voice_join,         False),
     "!войти":   (voice_join,         False),
@@ -654,7 +636,6 @@ VOICE_CMDS = {
     "!скажи":   (voice_say,          True),
     "!голос":   (voice_set_voice,    True),
 }
-
 
 async def process_text_response(channel, last_user, custom_prompt=None):
     try:
@@ -708,7 +689,6 @@ async def process_text_response(channel, last_user, custom_prompt=None):
     except Exception as e:
         print(f"[PROCESS ERROR] {e}", flush=True)
 
-
 def restart_coalesce_timer(channel, user, custom_prompt=None):
     cid = channel.id
     if cid in message_tasks:
@@ -716,14 +696,12 @@ def restart_coalesce_timer(channel, user, custom_prompt=None):
     message_buffers[cid] = True
     message_tasks[cid] = asyncio.create_task(process_text_response(channel, user, custom_prompt))
 
-
 @bot.event
 async def on_typing(channel, user, when):
     if user == bot.user or getattr(user, "bot", False):
         return
     if channel.id in message_buffers:
         restart_coalesce_timer(channel, user)
-
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -852,14 +830,12 @@ async def on_message(message: discord.Message):
     last_active_time = time.time()
     restart_coalesce_timer(message.channel, message.author, custom_prompt)
 
-
 @bot.event
 async def on_ready():
     print(f"[BOT] Запущен: {bot.user}", flush=True)
     asyncio.create_task(start_keepalive())
     asyncio.create_task(self_ping_loop())
     asyncio.create_task(status_manager_loop())
-
 
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:
