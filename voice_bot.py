@@ -11,6 +11,17 @@ from collections import defaultdict
 import aiohttp
 import discord
 import speech_recognition as sr
+
+# discord.py-self does not export SpeakingState, but voice_recv still imports it.
+if not hasattr(discord.enums, "SpeakingState"):
+    class SpeakingState(discord.enums.Enum):
+        none = 0
+        voice = 1
+        soundshare = 2
+        priority = 4
+
+    discord.enums.SpeakingState = SpeakingState
+
 from discord.ext import voice_recv
 from discord.ext.voice_recv.extras import speechrecognition as sr_ext
 from aiohttp import web
