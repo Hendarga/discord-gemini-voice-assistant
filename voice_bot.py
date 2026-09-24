@@ -148,7 +148,9 @@ ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
 ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2").strip()
 elevenlabs_disabled = False
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ru-RU").strip()
-VOICE_PHRASE_TIME_LIMIT = int(os.getenv("VOICE_PHRASE_TIME_LIMIT", "5"))
+VOICE_PHRASE_TIME_LIMIT = int(os.getenv("VOICE_PHRASE_TIME_LIMIT", "12"))
+VOICE_BUFFER_DELAY = float(os.getenv("VOICE_BUFFER_DELAY", "2.0"))
+VOICE_BUFFER_MAX_CHARS = int(os.getenv("VOICE_BUFFER_MAX_CHARS", "260"))
 VOICE_DEBUG  = os.getenv("VOICE_DEBUG", "true").lower() == "true"
 
 WEB_PORT = int(os.getenv("PORT", "10000"))
@@ -167,6 +169,19 @@ tts_voice_current = TTS_VOICE
 
 message_buffers = {}
 message_tasks   = {}
+speech_buffers: dict[int, str] = {}
+speech_tasks: dict[int, asyncio.Task] = {}
+
+
+def interrupt_current_voice(vc: discord.VoiceClient | None):
+    if not vc or not vc.is_connected():
+        return
+    try:
+        if vc.is_playing():
+            vc.stop()
+            print("[VOICE] Прерывание озвучки: собеседник начал говорить поверх бота", flush=True)
+    except Exception as e:
+        print(f"[VOICE] Не удалось прервать озвучку: {type(e).__name__}: {e}", flush=True)
 
 
 def get_trigger_words() -> list[str]:
@@ -597,6 +612,65 @@ async def handle_recognized_speech(text_channel, user, text, vc):
             await play_in_vc(vc, audio_bytes)
 
 
+def should_flush_voice_buffer(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if len(stripped) >= VOICE_BUFFER_MAX_CHARS:
+        return True
+    if stripped.endswith((".", "!", "?", ";", ":", "…")):
+        return True
+    if re.search(r"[.!?][\s\]\)]*$", stripped):
+        return True
+    return False
+
+
+def queue_voice_text(user, text, vc):
+    if not text or len(text.strip()) < 2:
+        return
+
+    if vc and vc.is_connected() and vc.is_playing():
+        interrupt_current_voice(vc)
+
+    user_id = user.id
+    previous = speech_buffers.get(user_id, "")
+    merged = f"{previous} {text}".strip() if previous else text.strip()
+    speech_buffers[user_id] = merged
+
+    if should_flush_voice_buffer(merged):
+        existing = speech_tasks.get(user_id)
+        if existing and not existing.done():
+            existing.cancel()
+        async def flush_now():
+            try:
+                buffered = speech_buffers.pop(user_id, "").strip()
+                if buffered:
+                    await handle_recognized_speech(None, user, buffered, vc)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                speech_tasks.pop(user_id, None)
+        speech_tasks[user_id] = asyncio.create_task(flush_now())
+        return
+
+    existing = speech_tasks.get(user_id)
+    if existing and not existing.done():
+        existing.cancel()
+
+    async def flush_delayed():
+        try:
+            await asyncio.sleep(VOICE_BUFFER_DELAY)
+            buffered = speech_buffers.pop(user_id, "").strip()
+            if buffered:
+                await handle_recognized_speech(None, user, buffered, vc)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            speech_tasks.pop(user_id, None)
+
+    speech_tasks[user_id] = asyncio.create_task(flush_delayed())
+
+
 @bot.event
 async def on_voice_state_update(
     member: discord.Member,
@@ -627,7 +701,7 @@ async def on_voice_state_update(
         def on_speech(user, text):
             if not getattr(user, 'bot', False) and user.id != bot.user.id:
                 asyncio.run_coroutine_threadsafe(
-                    handle_recognized_speech(None, user, text, new_vc),
+                    queue_voice_text(user, text, new_vc),
                     bot.loop
                 )
 
@@ -636,7 +710,7 @@ async def on_voice_state_update(
             process_cb=recognize_speech,
             text_cb=on_speech,
             phrase_time_limit=VOICE_PHRASE_TIME_LIMIT,
-            ignore_silence_packets=True
+            ignore_silence_packets=False
         )
         new_vc.listen(sink)
         dave_session = getattr(new_vc._connection, "dave_session", None)
@@ -664,7 +738,7 @@ async def voice_join(message: discord.Message):
     def on_speech(user, text):
         if not getattr(user, 'bot', False) and user.id != bot.user.id:
             asyncio.run_coroutine_threadsafe(
-                handle_recognized_speech(None, user, text, new_vc),
+                queue_voice_text(user, text, new_vc),
                 bot.loop
             )
 
@@ -673,7 +747,7 @@ async def voice_join(message: discord.Message):
         process_cb=recognize_speech,
         text_cb=on_speech,
         phrase_time_limit=VOICE_PHRASE_TIME_LIMIT,
-        ignore_silence_packets=True
+        ignore_silence_packets=False
     )
     new_vc.listen(sink)
     dave_session = getattr(new_vc._connection, "dave_session", None)
