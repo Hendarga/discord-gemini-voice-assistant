@@ -3,6 +3,7 @@ import asyncio
 import audioop
 import random
 import re
+import shutil
 import time
 import tempfile
 import io
@@ -179,7 +180,7 @@ class BotConfig:
             TARGET_COOLDOWN=env_int("TARGET_COOLDOWN", "180"),
             TTS_PROVIDER=os.getenv("TTS_PROVIDER", "edge").strip().lower(),
             TTS_PROVIDER_PRIORITY=env_list("TTS_PROVIDER_PRIORITY", "edge,elevenlabs,openai"),
-            TTS_VOICE=os.getenv("TTS_VOICE", "ja-JP-NanamiNeural"),
+            TTS_VOICE=os.getenv("TTS_VOICE", "ru-RU-DariyaNeural"),
             TTS_RATE=os.getenv("TTS_RATE", "+8%"),
             TTS_PITCH=os.getenv("TTS_PITCH", "+120Hz"),
             TTS_ENABLED=env_bool("TTS_ENABLED", "true"),
@@ -608,7 +609,10 @@ async def play_in_vc(vc: discord.VoiceClient, audio_bytes: bytes):
     done = asyncio.Event()
     loop = asyncio.get_event_loop()
     try:
-        source = discord.FFmpegPCMAudio(tmp_path)
+        ffmpeg_path = shutil.which("ffmpeg")
+        if not ffmpeg_path:
+            raise RuntimeError("FFmpeg is not installed or is not available on PATH")
+        source = discord.FFmpegPCMAudio(tmp_path, executable=ffmpeg_path)
 
         def after(err):
             try:
