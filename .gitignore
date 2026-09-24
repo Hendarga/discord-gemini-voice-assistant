@@ -1,7 +1,16 @@
 .env
+.env.*
+!.env.example
+.venv/
+venv/
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
+*.pyd
 *.wav
 *.mp3
 *.tmp
+*.log
+.DS_Store
+.idea/
+.vscode/

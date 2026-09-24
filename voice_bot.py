@@ -6,6 +6,7 @@ import re
 import time
 import tempfile
 import io
+from dataclasses import dataclass, field
 from importlib import metadata
 from collections import defaultdict
 
@@ -114,61 +115,139 @@ def _apply_voice_recv_patch():
 _apply_voice_recv_patch()
 
 
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
-GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY",    "").strip()
-GEMINI_MODEL      = os.getenv("GEMINI_MODEL",      "gemini-2.0-flash-lite").strip()
-GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.0-flash-lite").strip()
+@dataclass(frozen=True)
+class BotConfig:
+    DISCORD_BOT_TOKEN: str
+    GEMINI_API_KEY: str
+    GEMINI_MODEL: str
+    GEMINI_FALLBACK_MODEL: str
+    OWNER_ID: int
+    TARGET_GUILD_ID: int
+    ADMIN_IDS: set[int]
+    SYSTEM_PROMPT: str
+    VOICE_MODE_PROMPT: str
+    TRIGGER_WORDS_RAW: str
+    TARGET_IDS_RAW: str
+    TARGET_COOLDOWN: int
+    TTS_PROVIDER: str
+    TTS_PROVIDER_PRIORITY: list[str]
+    TTS_VOICE: str
+    TTS_RATE: str
+    TTS_PITCH: str
+    TTS_ENABLED: bool
+    ELEVENLABS_API_KEY: str
+    ELEVENLABS_VOICE_ID: str
+    ELEVENLABS_MODEL: str
+    OPENAI_API_KEY: str
+    OPENAI_TTS_MODEL: str
+    OPENAI_TTS_VOICE: str
+    STT_LANGUAGE: str
+    VOICE_PHRASE_TIME_LIMIT: int
+    VOICE_BUFFER_DELAY: float
+    VOICE_BUFFER_MAX_CHARS: int
+    VOICE_DEBUG: bool
+    DM_LOGS_ENABLED: bool
+    ALLOW_LEGACY_COMMANDS: bool
+    WEB_PORT: int
 
-# --- ИДЕНТИФИКАТОРЫ ---
-OWNER_ID        = int(os.getenv("OWNER_ID", "1121431968022798347"))
-TARGET_GUILD_ID = int(os.getenv("TARGET_GUILD_ID", "1527454812260532306"))
+    @classmethod
+    def from_env(cls) -> "BotConfig":
+        def env_bool(name: str, default: str) -> bool:
+            return os.getenv(name, default).strip().lower() == "true"
 
-ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
+        def env_int(name: str, default: str) -> int:
+            return int(os.getenv(name, default).strip() or default)
 
-SYSTEM_PROMPT = os.getenv(
-    "SYSTEM_PROMPT",
-    (
-        "Ты — Губка Боб Квадратные Штаны из городка Бикини Боттом. "
-        "Ты неунывающий оптимист, работаешь лучшим поваром в 'Красти Краб', обожаешь жарить крабсбургеры и ловить медуз с Патриком. "
-        "Общайся жизнерадостно, живо, эмоционально, с характерным юмором Губки Боба, но без излишней клоунады, если ситуация требует серьезности. "
-        "Никогда не выходи из роли. Не читай моралей и нотаций."
-    )
-)
+        def env_float(name: str, default: str) -> float:
+            return float(os.getenv(name, default).strip() or default)
 
-TRIGGER_WORDS_RAW = os.getenv("TRIGGER_WORDS", "боб,губка,spongebob,бот,bot")
-TARGET_IDS_RAW    = os.getenv("TARGET_IDS",    "")
-TARGET_COOLDOWN   = int(os.getenv("TARGET_COOLDOWN", "180"))
+        def env_list(name: str, default: str) -> list[str]:
+            return [x.strip().lower() for x in os.getenv(name, default).split(",") if x.strip()]
 
-TTS_VOICE    = os.getenv("TTS_VOICE",    "ru-RU-DariyaNeural")
-TTS_RATE     = os.getenv("TTS_RATE",     "+8%")
-TTS_PITCH    = os.getenv("TTS_PITCH",    "+120Hz")
-TTS_ENABLED  = os.getenv("TTS_ENABLED",  "true").lower() == "true"
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
-ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2").strip()
+        return cls(
+            DISCORD_BOT_TOKEN=os.getenv("DISCORD_BOT_TOKEN", "").strip(),
+            GEMINI_API_KEY=os.getenv("GEMINI_API_KEY", "").strip(),
+            GEMINI_MODEL=os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite").strip(),
+            GEMINI_FALLBACK_MODEL=os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.0-flash-lite").strip(),
+            OWNER_ID=env_int("OWNER_ID", "0"),
+            TARGET_GUILD_ID=env_int("TARGET_GUILD_ID", "0"),
+            ADMIN_IDS={int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()},
+            SYSTEM_PROMPT=os.getenv("SYSTEM_PROMPT", "").strip(),
+            VOICE_MODE_PROMPT=os.getenv("VOICE_MODE_PROMPT", "").strip(),
+            TRIGGER_WORDS_RAW=os.getenv("TRIGGER_WORDS", "").strip(),
+            TARGET_IDS_RAW=os.getenv("TARGET_IDS", ""),
+            TARGET_COOLDOWN=env_int("TARGET_COOLDOWN", "180"),
+            TTS_PROVIDER=os.getenv("TTS_PROVIDER", "edge").strip().lower(),
+            TTS_PROVIDER_PRIORITY=env_list("TTS_PROVIDER_PRIORITY", "edge,elevenlabs,openai"),
+            TTS_VOICE=os.getenv("TTS_VOICE", "ja-JP-NanamiNeural"),
+            TTS_RATE=os.getenv("TTS_RATE", "+8%"),
+            TTS_PITCH=os.getenv("TTS_PITCH", "+120Hz"),
+            TTS_ENABLED=env_bool("TTS_ENABLED", "true"),
+            ELEVENLABS_API_KEY=os.getenv("ELEVENLABS_API_KEY", "").strip(),
+            ELEVENLABS_VOICE_ID=os.getenv("ELEVENLABS_VOICE_ID", "").strip(),
+            ELEVENLABS_MODEL=os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2").strip(),
+            OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", "").strip(),
+            OPENAI_TTS_MODEL=os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts").strip(),
+            OPENAI_TTS_VOICE=os.getenv("OPENAI_TTS_VOICE", "alloy").strip(),
+            STT_LANGUAGE=os.getenv("STT_LANGUAGE", "ru-RU").strip(),
+            VOICE_PHRASE_TIME_LIMIT=env_int("VOICE_PHRASE_TIME_LIMIT", "12"),
+            VOICE_BUFFER_DELAY=env_float("VOICE_BUFFER_DELAY", "2.0"),
+            VOICE_BUFFER_MAX_CHARS=env_int("VOICE_BUFFER_MAX_CHARS", "260"),
+            VOICE_DEBUG=env_bool("VOICE_DEBUG", "true"),
+            DM_LOGS_ENABLED=env_bool("DM_LOGS_ENABLED", "false"),
+            ALLOW_LEGACY_COMMANDS=env_bool("ALLOW_LEGACY_COMMANDS", "false"),
+            WEB_PORT=env_int("PORT", "10000"),
+        )
+
+
+CONFIG = BotConfig.from_env()
+
+DISCORD_BOT_TOKEN = CONFIG.DISCORD_BOT_TOKEN
+GEMINI_API_KEY = CONFIG.GEMINI_API_KEY
+GEMINI_MODEL = CONFIG.GEMINI_MODEL
+GEMINI_FALLBACK_MODEL = CONFIG.GEMINI_FALLBACK_MODEL
+OWNER_ID = CONFIG.OWNER_ID
+TARGET_GUILD_ID = CONFIG.TARGET_GUILD_ID
+ADMIN_IDS = CONFIG.ADMIN_IDS
+SYSTEM_PROMPT = CONFIG.SYSTEM_PROMPT
+VOICE_MODE_PROMPT = CONFIG.VOICE_MODE_PROMPT
+TRIGGER_WORDS_RAW = CONFIG.TRIGGER_WORDS_RAW
+TARGET_IDS_RAW = CONFIG.TARGET_IDS_RAW
+TARGET_COOLDOWN = CONFIG.TARGET_COOLDOWN
+TTS_PROVIDER = CONFIG.TTS_PROVIDER
+TTS_PROVIDER_PRIORITY = CONFIG.TTS_PROVIDER_PRIORITY
+TTS_VOICE = CONFIG.TTS_VOICE
+TTS_RATE = CONFIG.TTS_RATE
+TTS_PITCH = CONFIG.TTS_PITCH
+TTS_ENABLED = CONFIG.TTS_ENABLED
+ELEVENLABS_API_KEY = CONFIG.ELEVENLABS_API_KEY
+ELEVENLABS_VOICE_ID = CONFIG.ELEVENLABS_VOICE_ID
+ELEVENLABS_MODEL = CONFIG.ELEVENLABS_MODEL
+OPENAI_API_KEY = CONFIG.OPENAI_API_KEY
+OPENAI_TTS_MODEL = CONFIG.OPENAI_TTS_MODEL
+OPENAI_TTS_VOICE = CONFIG.OPENAI_TTS_VOICE
+STT_LANGUAGE = CONFIG.STT_LANGUAGE
+VOICE_PHRASE_TIME_LIMIT = CONFIG.VOICE_PHRASE_TIME_LIMIT
+VOICE_BUFFER_DELAY = CONFIG.VOICE_BUFFER_DELAY
+VOICE_BUFFER_MAX_CHARS = CONFIG.VOICE_BUFFER_MAX_CHARS
+VOICE_DEBUG = CONFIG.VOICE_DEBUG
+DM_LOGS_ENABLED = CONFIG.DM_LOGS_ENABLED
+ALLOW_LEGACY_COMMANDS = CONFIG.ALLOW_LEGACY_COMMANDS
+WEB_PORT = CONFIG.WEB_PORT
+
 elevenlabs_disabled = False
-STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ru-RU").strip()
-VOICE_PHRASE_TIME_LIMIT = int(os.getenv("VOICE_PHRASE_TIME_LIMIT", "12"))
-VOICE_BUFFER_DELAY = float(os.getenv("VOICE_BUFFER_DELAY", "2.0"))
-VOICE_BUFFER_MAX_CHARS = int(os.getenv("VOICE_BUFFER_MAX_CHARS", "260"))
-VOICE_DEBUG  = os.getenv("VOICE_DEBUG", "true").lower() == "true"
 
-WEB_PORT = int(os.getenv("PORT", "10000"))
-COALESCE_DELAY = 6.0
-
-bot               = discord.Client()
+bot = discord.Client()
 request_semaphore = asyncio.Semaphore(3)
-voice_lock        = asyncio.Lock()
+voice_lock = asyncio.Lock()
 
 voice_history = defaultdict(list)
-user_cooldowns:   dict[int, float] = {}
-is_bot_active     = True
-last_active_time  = 0.0
-current_status    = discord.Status.invisible
+user_cooldowns: dict[int, float] = {}
+is_bot_active = True
+last_active_time = 0.0
+current_status = discord.Status.invisible
 tts_voice_current = TTS_VOICE
 
-message_buffers = {}
-message_tasks   = {}
 speech_buffers: dict[int, str] = {}
 speech_tasks: dict[int, asyncio.Task] = {}
 
@@ -179,9 +258,9 @@ def interrupt_current_voice(vc: discord.VoiceClient | None):
     try:
         if vc.is_playing():
             vc.stop()
-            print("[VOICE] Прерывание озвучки: собеседник начал говорить поверх бота", flush=True)
+            print("[VOICE] Audio playback interrupted: someone started speaking over the bot", flush=True)
     except Exception as e:
-        print(f"[VOICE] Не удалось прервать озвучку: {type(e).__name__}: {e}", flush=True)
+        print(f"[VOICE] Failed to interrupt playback: {type(e).__name__}: {e}", flush=True)
 
 
 def get_trigger_words() -> list[str]:
@@ -219,15 +298,15 @@ def clean_reply(text: str) -> str:
 
 
 async def send_to_owner_dm(content: str):
-    """Отправляет текстовое сообщение напрямую тебе в ЛС."""
-    if not OWNER_ID:
+    """Send a DM log only when explicitly enabled in the environment."""
+    if not DM_LOGS_ENABLED or not OWNER_ID:
         return
     try:
         owner = bot.get_user(OWNER_ID) or await bot.fetch_user(OWNER_ID)
         if owner:
             await owner.send(content)
     except Exception as e:
-        print(f"[DM ERROR] Не удалось отправить в ЛС: {e}", flush=True)
+        print(f"[DM ERROR] Failed to send DM: {e}", flush=True)
 
 
 async def handle_health(req):
@@ -332,10 +411,10 @@ async def gemini_discover_models() -> list[str]:
             ):
                 models.append(name)
         models.sort(key=lambda name: ("flash-lite" not in name.lower(), name),)
-        print(f"[GEMINI DEBUG] Доступные текстовые Flash-модели: {models[:5]}", flush=True)
+        print(f"[GEMINI DEBUG] Available text Flash models: {models[:5]}", flush=True)
         return models[:5]
     except Exception as e:
-        print(f"[GEMINI ERROR] Не удалось получить список моделей: {type(e).__name__}: {e}", flush=True)
+        print(f"[GEMINI ERROR] Failed to fetch model list: {type(e).__name__}: {e}", flush=True)
         return []
 
 
@@ -367,7 +446,7 @@ def extract_candidate_text(data: dict) -> str:
         return ""
 
 
-async def gemini_voice(channel_id: int, user_text: str, user_name: str = "Собеседник") -> str:
+async def gemini_voice(channel_id: int, user_text: str, user_name: str = "User") -> str:
     history = voice_history[channel_id]
     formatted_input = f"[{user_name}]: {user_text}"
 
@@ -380,11 +459,9 @@ async def gemini_voice(channel_id: int, user_text: str, user_name: str = "Соб
         voice_history[channel_id] = history[-12:]
         history = voice_history[channel_id]
 
-    voice_prompt = (
-        SYSTEM_PROMPT
-        + "\n\n[ГОЛОСОВОЙ РЕЖИМ] Отвечай кратко, максимум 2-3 предложения. "
-        "Не используй эмодзи, звездочки, скобки и спецсимволы. Отвечай прямо речью вслух."
-    )
+    voice_prompt = SYSTEM_PROMPT
+    if VOICE_MODE_PROMPT:
+        voice_prompt = f"{voice_prompt}\n\n{VOICE_MODE_PROMPT}" if voice_prompt else VOICE_MODE_PROMPT
 
     payload = {
         "system_instruction": {"parts": [{"text": voice_prompt}]},
@@ -421,26 +498,26 @@ async def gemini_voice(channel_id: int, user_text: str, user_name: str = "Соб
             elif isinstance(data, dict) and data.get("http_status") == 429:
                 print(
                     f"[GEMINI ERROR] Quota exceeded for model={model_name}; "
-                    "не повторяю запрос к этой модели",
+                    "skipping retries for this model",
                     flush=True,
                 )
                 break
             elif VOICE_DEBUG:
                 print(
-                    f"[GEMINI DEBUG] Нет usable-ответа attempt={attempt + 1} "
+                    f"[GEMINI DEBUG] No usable response attempt={attempt + 1} "
                     f"model={model_name} data_keys={list(data) if isinstance(data, dict) else type(data).__name__}",
                     flush=True,
                 )
                 if isinstance(data, dict) and data.get("promptFeedback", {}).get("blockReason"):
                     print(
-                        f"[GEMINI DEBUG] Prompt заблокирован: "
+                        f"[GEMINI DEBUG] Prompt blocked: "
                         f"{data['promptFeedback']['blockReason']}",
                         flush=True,
                     )
             await asyncio.sleep(1.0)
 
-    print(f"[GEMINI ERROR] Fallback после моделей: {models}", flush=True)
-    return "Что-то со связью на дне океана!"
+    print(f"[GEMINI ERROR] Fallback after model list: {models}", flush=True)
+    return "Something went wrong with the connection."
 
 
 async def synthesize_elevenlabs(text: str) -> bytes | None:
@@ -469,18 +546,18 @@ async def synthesize_elevenlabs(text: str) -> bytes | None:
             async with s.post(url, headers=headers, json=payload) as resp:
                 audio = await resp.read()
                 if resp.status == 200 and audio:
-                    print("[TTS] Использован ElevenLabs", flush=True)
+                    print("[TTS] Using ElevenLabs", flush=True)
                     return audio
                 details = audio[:300].decode("utf-8", errors="replace")
                 if resp.status in (401, 402, 429):
                     elevenlabs_disabled = True
                 print(
                     f"[TTS] ElevenLabs status={resp.status}; details={details}; "
-                    "переход на Edge TTS до перезапуска",
+                    "falling back to Edge TTS until restart",
                     flush=True,
                 )
     except Exception as e:
-        print(f"[TTS] ElevenLabs error: {type(e).__name__}: {e}; переход на Edge TTS", flush=True)
+        print(f"[TTS] ElevenLabs error: {type(e).__name__}: {e}; falling back to Edge TTS", flush=True)
     return None
 
 
@@ -557,17 +634,17 @@ def recognize_speech(recognizer, audio, user):
         raw_audio = audio.get_raw_data()
         signal_level = audioop.rms(raw_audio, audio.sample_width) if raw_audio else 0
         print(
-            f"[STT] Получен аудиофрагмент от {getattr(user, 'display_name', user)} "
+            f"[STT] Audio fragment received from {getattr(user, 'display_name', user)} "
             f"({audio.sample_rate} Hz, {audio.sample_width} bytes, rms={signal_level})",
             flush=True,
         )
     try:
         text = recognizer.recognize_google(audio, language=STT_LANGUAGE)
-        print(f"[STT] Распознано: {text!r}", flush=True)
+        print(f"[STT] Recognized: {text!r}", flush=True)
         return text
     except sr.UnknownValueError:
         if VOICE_DEBUG:
-            print("[STT] Речь не разобрана или слишком тихая", flush=True)
+            print("[STT] Speech not recognized or too quiet", flush=True)
         return None
     except sr.RequestError as e:
         print(f"[STT ERROR] Google Speech Recognition: {e}", flush=True)
@@ -575,36 +652,34 @@ def recognize_speech(recognizer, audio, user):
 
 
 async def handle_recognized_speech(text_channel, user, text, vc):
-    """Принимает голос, отправляет расшифровку и ответ в ЛС владельцу, озвучивает в ГС."""
+    """Process recognized speech, generate a reply, and play it in voice chat."""
     if not text or len(text.strip()) < 2:
         if VOICE_DEBUG:
-            print("[VOICE] Получен пустой или слишком короткий текст", flush=True)
+            print("[VOICE] Empty or too short text received", flush=True)
         return
 
     print(
-        f"[VOICE] Обрабатываю фразу от {getattr(user, 'display_name', user)}: {text!r}",
+        f"[VOICE] Processing phrase from {getattr(user, 'display_name', user)}: {text!r}",
         flush=True,
     )
     async with voice_lock:
-        # 1. Отправляем распознанную речь тебе в ЛС
-        asyncio.create_task(send_to_owner_dm(f"🎤 **[ГС] {user.display_name}**: {text}"))
+        if DM_LOGS_ENABLED:
+            asyncio.create_task(send_to_owner_dm(f"🎤 **[VOICE] {user.display_name}**: {text}"))
 
-        # 2. Получаем ответ ИИ
         reply = await gemini_voice(vc.channel.id if vc else 0, text, user.display_name)
-        print(f"[VOICE] Ответ Gemini: {reply!r}", flush=True)
+        print(f"[VOICE] Gemini reply: {reply!r}", flush=True)
 
-        if reply.startswith("[ОШИБКА") or reply.startswith("Ошибка"):
-            await send_to_owner_dm(f"⚠️ Ошибка ИИ в ГС:\n```{reply}```")
+        if reply.startswith("[ERROR") or reply.startswith("Error"):
+            await send_to_owner_dm(f"⚠️ AI error in voice mode:\n```{reply}```")
             return
 
-        # 3. Отправляем ответ бота тебе в ЛС
-        asyncio.create_task(send_to_owner_dm(f"🧽 **Губка Боб**: {reply}"))
+        if DM_LOGS_ENABLED:
+            asyncio.create_task(send_to_owner_dm(f"🧽 **Bot**: {reply}"))
 
-        # 4. Воспроизводим звук в голосовой канал
         audio_bytes = await synthesize(reply)
         if VOICE_DEBUG:
             print(
-                f"[TTS] Аудио {'создано' if audio_bytes else 'не создано'}; "
+                f"[TTS] Audio {'generated' if audio_bytes else 'not generated'}; "
                 f"voice_connected={bool(vc and vc.is_connected())}",
                 flush=True,
             )
@@ -680,7 +755,7 @@ async def on_voice_state_update(
     if not is_bot_active or after.channel is None or member.id == bot.user.id:
         return
 
-    # Проверка, что событие происходит на целевом сервере
+    # Only handle events from the configured guild.
     if member.guild.id != TARGET_GUILD_ID:
         return
 
@@ -715,12 +790,12 @@ async def on_voice_state_update(
         new_vc.listen(sink)
         dave_session = getattr(new_vc._connection, "dave_session", None)
         print(
-            f"[VOICE] Receive sink запущен: listening={new_vc.is_listening()}, "
+            f"[VOICE] Receive sink started: listening={new_vc.is_listening()}, "
             f"ssrc_map={getattr(new_vc, 'ssrc', {})}, "
             f"dave_ready={bool(dave_session and dave_session.ready)}",
             flush=True,
         )
-        await send_to_owner_dm(f"🟢 Подключился к ГС **{after.channel.name}** на сервере `{member.guild.name}`")
+        await send_to_owner_dm(f"🟢 Joined voice channel **{after.channel.name}** on server `{member.guild.name}`")
 
     except Exception as e:
         print(f"[VOICE TRACK ERROR] {e}", flush=True)
@@ -728,7 +803,7 @@ async def on_voice_state_update(
 
 async def voice_join(message: discord.Message):
     if not message.author.voice:
-        await message.reply("❌ Зайди в голосовой канал!", mention_author=False)
+        await message.reply("❌ Join a voice channel first!", mention_author=False)
         return
     vc = message.guild.voice_client
     if vc:
@@ -752,29 +827,32 @@ async def voice_join(message: discord.Message):
     new_vc.listen(sink)
     dave_session = getattr(new_vc._connection, "dave_session", None)
     print(
-        f"[VOICE] Receive sink запущен: listening={new_vc.is_listening()}, "
+        f"[VOICE] Receive sink started: listening={new_vc.is_listening()}, "
         f"ssrc_map={getattr(new_vc, 'ssrc', {})}, "
         f"dave_ready={bool(dave_session and dave_session.ready)}",
         flush=True,
     )
-    await message.reply(f"✅ Зашел в **{message.author.voice.channel.name}**. Логи голосового чата будут идти в ЛС.", mention_author=False)
+    await message.reply(f"✅ Joined **{message.author.voice.channel.name}**. Voice logs are only sent if DM logging is enabled.", mention_author=False)
 
 
 async def voice_leave(message: discord.Message):
     vc = message.guild.voice_client
     if not vc:
-        await message.reply("❌ Я не в голосовом канале.", mention_author=False)
+        await message.reply("❌ I am not in a voice channel.", mention_author=False)
         return
     await vc.disconnect(force=True)
-    await message.reply("👋 Поплыл обратно в ананас!", mention_author=False)
+    await message.reply("👋 Left the voice channel.", mention_author=False)
 
 
 VOICE_CMDS = {
-    "!join":  (voice_join,  False),
-    "!войти": (voice_join,  False),
+    "!join": (voice_join, False),
     "!leave": (voice_leave, False),
-    "!выйти": (voice_leave, False),
 }
+if ALLOW_LEGACY_COMMANDS:
+    VOICE_CMDS.update({
+        "!войти": (voice_join, False),
+        "!выйти": (voice_leave, False),
+    })
 
 
 @bot.event
@@ -796,39 +874,44 @@ async def on_message(message: discord.Message):
         await handler(message)
         return
 
-    # Управление через ЛС (команды # и %)
-    if message.guild is None and message.author.id == OWNER_ID:
-        if content.startswith("#"):
+    if message.guild is None:
+        # Owner-only voice controls remain available with # and % prefixes.
+        if message.author.id == OWNER_ID and content.startswith("#"):
             text_to_say = content[1:].strip()
             vc = next((g.voice_client for g in bot.guilds if g.voice_client and g.voice_client.is_connected()), None)
             if not vc:
-                await message.reply("❌ Бот не подключен к ГС.", mention_author=False)
+                await message.reply("❌ No voice connection is active.", mention_author=False)
                 return
             audio = await synthesize(text_to_say)
             if audio:
                 await play_in_vc(vc, audio)
-                await message.reply(f"🔊 Озвучено в **{vc.channel.name}**", mention_author=False)
+                await message.reply(f"🔊 Played in **{vc.channel.name}**", mention_author=False)
             return
 
-        elif content.startswith("%"):
+        if message.author.id == OWNER_ID and content.startswith("%"):
             question = content[1:].strip()
             vc = next((g.voice_client for g in bot.guilds if g.voice_client and g.voice_client.is_connected()), None)
             if not vc:
-                await message.reply("❌ Бот не подключен к ГС.", mention_author=False)
+                await message.reply("❌ No voice connection is active.", mention_author=False)
                 return
             reply = await gemini_voice(vc.channel.id, question, message.author.display_name)
-            await send_to_owner_dm(f"🧽 **Губка Боб**: {reply}")
             audio = await synthesize(reply)
             if audio:
                 await play_in_vc(vc, audio)
             return
+
+        # Every other direct message receives a normal text reply.
+        reply = await gemini_voice(message.channel.id, content, message.author.display_name)
+        for chunk in split_for_discord(reply):
+            await message.channel.send(chunk)
+        return
 
     last_active_time = time.time()
 
 
 @bot.event
 async def on_ready():
-    print(f"[BOT] Запущен как {bot.user} (ID: {bot.user.id})", flush=True)
+    print(f"[BOT] Started as {bot.user} (ID: {bot.user.id})", flush=True)
     print(
         "[DIAGNOSTICS] "
         f"discord={getattr(discord, '__version__', 'unknown')} "
@@ -846,5 +929,5 @@ async def on_ready():
 
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:
-        raise RuntimeError("[ОШИБКА] DISCORD_BOT_TOKEN не указан!")
+        raise RuntimeError("[ERROR] DISCORD_BOT_TOKEN is not configured!")
     bot.run(DISCORD_BOT_TOKEN)
