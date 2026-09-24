@@ -251,6 +251,10 @@ tts_voice_current = TTS_VOICE
 
 speech_buffers: dict[int, str] = {}
 speech_tasks: dict[int, asyncio.Task] = {}
+typing_task: asyncio.Task | None = None
+
+TYPING_GUILD_ID = 1527454812260532306
+TYPING_CHANNEL_ID = 1528110425109954701
 
 
 def interrupt_current_voice(vc: discord.VoiceClient | None):
@@ -848,6 +852,45 @@ async def voice_leave(message: discord.Message):
     await message.reply("👋 Left the voice channel.", mention_author=False)
 
 
+def can_control_typing(message: discord.Message) -> bool:
+    return (
+        message.guild is not None
+        and message.guild.id == TYPING_GUILD_ID
+        and message.channel.id == TYPING_CHANNEL_ID
+        and (message.author.id == OWNER_ID or message.author.id in ADMIN_IDS)
+    )
+
+
+async def typing_loop(channel: discord.abc.Messageable):
+    while True:
+        async with channel.typing():
+            await asyncio.sleep(8)
+
+
+async def start_typing(message: discord.Message):
+    global typing_task
+    if not can_control_typing(message):
+        return
+    if typing_task and not typing_task.done():
+        await message.reply("Уже печатаю.", mention_author=False)
+        return
+    typing_task = asyncio.create_task(typing_loop(message.channel))
+    await message.reply("Начала печатать.", mention_author=False)
+
+
+async def stop_typing(message: discord.Message):
+    global typing_task
+    if not can_control_typing(message):
+        return
+    if typing_task and not typing_task.done():
+        typing_task.cancel()
+        await asyncio.gather(typing_task, return_exceptions=True)
+        typing_task = None
+        await message.reply("Остановила печать.", mention_author=False)
+        return
+    await message.reply("Печать уже остановлена.", mention_author=False)
+
+
 VOICE_CMDS = {
     "!join": (voice_join, False),
     "!leave": (voice_leave, False),
@@ -872,6 +915,14 @@ async def on_message(message: discord.Message):
 
     parts   = content.split(maxsplit=1)
     cmd_key = parts[0].lower()
+
+    if cmd_key in ("!typing", "!печать"):
+        await start_typing(message)
+        return
+
+    if cmd_key in ("!typing-stop", "!печать-стоп"):
+        await stop_typing(message)
+        return
 
     if cmd_key in VOICE_CMDS:
         handler, _ = VOICE_CMDS[cmd_key]
